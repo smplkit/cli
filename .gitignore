@@ -1,0 +1,11 @@
+# Build artifacts
+/smplkit
+/dist/
+
+# Test/coverage
+coverage.out
+
+# Editor / OS metadata
+.idea/
+.vscode/
+.DS_Store

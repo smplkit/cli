@@ -1,0 +1,135 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # semantic-release creates a tag + GitHub release
+  issues: write     # semantic-release may comment on closed issues
+  pull-requests: write
+  packages: write   # GHCR push
+
+jobs:
+  release:
+    name: tag + sign + publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # full history for semantic-release
+          persist-credentials: false
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: set up qemu
+        uses: docker/setup-qemu-action@v3
+
+      - name: set up docker buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: install semantic-release (in /tmp so the workspace stays clean)
+        run: |
+          mkdir -p /tmp/semrel
+          cd /tmp/semrel
+          npm init -y >/dev/null
+          npm install --no-save --no-fund --no-audit \
+            semantic-release@22 \
+            @semantic-release/commit-analyzer@11 \
+            @semantic-release/release-notes-generator@12 \
+            @semantic-release/github@9 \
+            conventional-changelog-conventionalcommits@7
+
+      - name: run semantic-release (tag-only mode)
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # First pass: just decide the next version and tag. We don't
+          # let semantic-release publish the GitHub release here —
+          # GoReleaser owns that so the signed checksums land in the
+          # same release.
+          /tmp/semrel/node_modules/.bin/semantic-release --dry-run > /tmp/semrel.out 2>&1 || true
+          cat /tmp/semrel.out
+          version=$(grep -oE 'next release version is [0-9]+\.[0-9]+\.[0-9]+' /tmp/semrel.out | tail -1 | awk '{print $5}')
+          if [[ -z "$version" ]]; then
+            echo "No release needed (no commits since last tag warrant a bump)."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Resolved next version: $version"
+          echo "released=true" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          # Create and push the annotated tag.
+          git config user.name "smplkit-release-bot"
+          git config user.email "release@smplkit.com"
+          git tag -a "v$version" -m "Release v$version"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "v$version"
+
+      - name: verify workspace is clean before GoReleaser
+        if: steps.release.outputs.released == 'true'
+        run: |
+          # GoReleaser's dirty-state check rejects any untracked file.
+          # Drop common offenders before the build runs.
+          rm -rf node_modules dist coverage.out smplkit
+          git status --short
+          test -z "$(git status --short)" || { echo 'workspace still dirty'; exit 1; }
+
+      - name: import GPG key
+        if: steps.release.outputs.released == 'true'
+        env:
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+          GPG_SIGNING_PASSWORD: ${{ secrets.GPG_SIGNING_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # GPG_SIGNING_KEY may be base64-encoded (the Maven Central
+          # provenance) or armored ASCII directly. Try base64 first; on
+          # failure assume it's already armored.
+          tmp=$(mktemp)
+          if echo "$GPG_SIGNING_KEY" | base64 --decode > "$tmp" 2>/dev/null && \
+             grep -q "BEGIN PGP PRIVATE KEY BLOCK" "$tmp"; then
+            echo "Imported GPG key from base64-encoded secret."
+          else
+            printf '%s' "$GPG_SIGNING_KEY" > "$tmp"
+            echo "Imported GPG key from armored ASCII secret."
+          fi
+          gpg --batch --pinentry-mode loopback --passphrase "$GPG_SIGNING_PASSWORD" --import "$tmp"
+          rm -f "$tmp"
+
+          fp=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/{print $10; exit}')
+          if [[ -z "$fp" ]]; then
+            echo "::error::failed to extract GPG fingerprint after import"
+            exit 1
+          fi
+          echo "GPG_FINGERPRINT=$fp" >> "$GITHUB_ENV"
+
+      - name: install GoReleaser
+        if: steps.release.outputs.released == 'true'
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          install-only: true
+          version: "~> v2"
+
+      - name: GoReleaser release
+        if: steps.release.outputs.released == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GPG_SIGNING_PASSWORD: ${{ secrets.GPG_SIGNING_PASSWORD }}
+          GPG_FINGERPRINT: ${{ env.GPG_FINGERPRINT }}
+        run: goreleaser release --clean
