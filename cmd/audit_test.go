@@ -89,3 +89,23 @@ func TestParseForwarderType_ErrorIncludesValidList(t *testing.T) {
 		t.Errorf("error should list valid types, got %v", err)
 	}
 }
+
+// Regression: --disabled alone on `audit forwarder set` must not
+// trip the mutual-exclusion check, even though --enabled defaults to
+// true. The check now keys off cmd.Flags().Changed(...) instead of
+// the raw bool values. Lives at the cmd level rather than down in a
+// helper because the bug was the surface-level cobra wiring.
+func TestForwarderSetCmd_DisabledAloneIsAccepted(t *testing.T) {
+	cmd := forwarderSetCmd()
+	// Parse args so cmd.Flags().Changed("disabled") is true and
+	// "enabled" is false (it stays at its declared default).
+	if err := cmd.ParseFlags([]string{"--disabled"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if !cmd.Flags().Changed("disabled") {
+		t.Fatal("--disabled should be marked Changed after parse")
+	}
+	if cmd.Flags().Changed("enabled") {
+		t.Fatal("--enabled should NOT be marked Changed (we didn't pass it)")
+	}
+}

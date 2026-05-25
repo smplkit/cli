@@ -231,7 +231,11 @@ func forwarderSetCmd() *cobra.Command {
 		Short: "Update a SIEM forwarder (read-modify-write)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if enabledFlag && disabledFlag {
+			// `--enabled` defaults to true (sensible for `create`), so
+			// `enabledFlag && disabledFlag` would trip every time
+			// `--disabled` is passed alone. Compare on the user's
+			// intent — were both explicitly set on the command line?
+			if cmd.Flags().Changed("enabled") && cmd.Flags().Changed("disabled") {
 				return fmt.Errorf("--enabled and --disabled are mutually exclusive")
 			}
 			id := args[0]
