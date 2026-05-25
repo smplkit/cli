@@ -41,7 +41,12 @@ jobs:
       - name: configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN_CI }}
+          # Org-level secret shared with every smplkit repo. The
+          # terraform-provider uses its own repo-scoped role with a
+          # trust policy locked to refs/heads/main; we don't need a
+          # CLI-specific role since the workflow only needs ECR read
+          # to pull the platform images for docker-compose.
+          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: log in to ECR
