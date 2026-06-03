@@ -93,7 +93,12 @@ jobs:
 
       - name: bootstrap account + API key
         id: bootstrap
-        run: python3 scripts/smoke_bootstrap.py
+        uses: smplkit/.github/actions/smoke-account@main
+        with:
+          mode: bootstrap
+          base-url: ${{ env.SMOKE_BASE_URL }}
+          app-auth-secret: ${{ env.APP_AUTH_SECRET }}
+          rate-limit-bypass-token: ${{ env.SMPLKIT_RATE_LIMIT_BYPASS_TOKEN }}
 
       - name: setup go
         uses: actions/setup-go@v5
