@@ -530,12 +530,17 @@ func (r Renderer) renderServiceTable(ss []*smplkit.Service) error {
 // ── Audit Forwarder ──────────────────────────────────────────────────
 
 // ForwarderAttr is the JSON/YAML shape for an audit forwarder.
+//
+// Enablement is per-environment (ADR-055): a forwarder delivers in an
+// environment only when that environment has an entry in Environments
+// with enabled=true. There is no global on/off switch — the SDK's base
+// Enabled field is read-only and always false, so it is not surfaced.
 type ForwarderAttr struct {
 	ID            string                          `json:"id" yaml:"id"`
 	Name          string                          `json:"name" yaml:"name"`
 	Description   *string                         `json:"description,omitempty" yaml:"description,omitempty"`
 	ForwarderType smplkit.ForwarderType           `json:"type" yaml:"type"`
-	Enabled       bool                            `json:"enabled" yaml:"enabled"`
+	Environments  map[string]ForwarderEnvAttr     `json:"environments,omitempty" yaml:"environments,omitempty"`
 	Configuration ForwarderHTTPConfigAttr         `json:"configuration" yaml:"configuration"`
 	Filter        map[string]interface{}          `json:"filter,omitempty" yaml:"filter,omitempty"`
 	Transform     interface{}                     `json:"transform,omitempty" yaml:"transform,omitempty"`
@@ -543,6 +548,14 @@ type ForwarderAttr struct {
 	CreatedAt     *time.Time                      `json:"created_at,omitempty" yaml:"created_at,omitempty"`
 	UpdatedAt     *time.Time                      `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
 	Version       *int                            `json:"version,omitempty" yaml:"version,omitempty"`
+}
+
+// ForwarderEnvAttr is the JSON/YAML shape for a per-environment override.
+// A nil Configuration inherits the forwarder's base configuration for
+// that environment.
+type ForwarderEnvAttr struct {
+	Enabled       bool                     `json:"enabled" yaml:"enabled"`
+	Configuration *ForwarderHTTPConfigAttr `json:"configuration,omitempty" yaml:"configuration,omitempty"`
 }
 
 // ForwarderHTTPConfigAttr is the JSON/YAML shape for the HTTP destination
@@ -562,25 +575,43 @@ type ForwarderHeaderAttr struct {
 	Value string `json:"value" yaml:"value"`
 }
 
+// httpConfigToAttr projects an SDK HttpConfiguration onto its attribute
+// shape. Shared by the base configuration and per-environment overrides.
+func httpConfigToAttr(c smplkit.HttpConfiguration) ForwarderHTTPConfigAttr {
+	cfg := ForwarderHTTPConfigAttr{
+		URL:           c.URL,
+		Method:        c.Method,
+		SuccessStatus: c.SuccessStatus,
+		TLSVerify:     c.TlsVerify,
+		CACert:        c.CaCert,
+	}
+	for _, h := range c.Headers {
+		cfg.Headers = append(cfg.Headers, ForwarderHeaderAttr{Name: h.Name, Value: h.Value})
+	}
+	return cfg
+}
+
 // ForwarderToAttr projects a Forwarder.
 func ForwarderToAttr(f *smplkit.Forwarder) ForwarderAttr {
-	cfg := ForwarderHTTPConfigAttr{
-		URL:           f.Configuration.URL,
-		Method:        f.Configuration.Method,
-		SuccessStatus: f.Configuration.SuccessStatus,
-		TLSVerify:     f.Configuration.TlsVerify,
-		CACert:        f.Configuration.CaCert,
-	}
-	for _, h := range f.Configuration.Headers {
-		cfg.Headers = append(cfg.Headers, ForwarderHeaderAttr{Name: h.Name, Value: h.Value})
+	var envs map[string]ForwarderEnvAttr
+	if len(f.Environments) > 0 {
+		envs = make(map[string]ForwarderEnvAttr, len(f.Environments))
+		for k, e := range f.Environments {
+			attr := ForwarderEnvAttr{Enabled: e.Enabled}
+			if e.Configuration != nil {
+				cfg := httpConfigToAttr(*e.Configuration)
+				attr.Configuration = &cfg
+			}
+			envs[k] = attr
+		}
 	}
 	return ForwarderAttr{
 		ID:            f.ID,
 		Name:          f.Name,
 		Description:   f.Description,
 		ForwarderType: f.ForwarderType,
-		Enabled:       f.Enabled,
-		Configuration: cfg,
+		Environments:  envs,
+		Configuration: httpConfigToAttr(f.Configuration),
 		Filter:        f.Filter,
 		Transform:     f.Transform,
 		TransformType: f.TransformType,
@@ -624,12 +655,29 @@ func (r Renderer) RenderForwarders(fs []smplkit.Forwarder) error {
 
 func (r Renderer) renderForwarderTable(fs []smplkit.Forwarder) error {
 	tw := newTabWriter(r.Out)
-	fmt.Fprintln(tw, "ID\tNAME\tTYPE\tENABLED\tURL")
+	fmt.Fprintln(tw, "ID\tNAME\tTYPE\tENABLED ENVS\tURL")
 	for _, f := range fs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%s\n",
-			f.ID, f.Name, string(f.ForwarderType), f.Enabled, f.Configuration.URL)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			f.ID, f.Name, string(f.ForwarderType),
+			strings.Join(enabledEnvKeys(f.Environments), ","), f.Configuration.URL)
 	}
 	return tw.Flush()
+}
+
+// enabledEnvKeys returns the sorted environment keys whose entry is
+// enabled. A forwarder delivers only in these environments.
+func enabledEnvKeys(m map[string]smplkit.ForwarderEnvironment) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k, e := range m {
+		if e.Enabled {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

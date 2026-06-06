@@ -15,16 +15,27 @@ import (
 // forwarderFileShape is the JSON/YAML body for `-f forwarder.json`.
 // Mirrors output.ForwarderAttr but every field is omitempty so a
 // `get -o json` snapshot can be replayed unchanged on `set -f -`.
+//
+// Enablement is per-environment (ADR-055): a forwarder delivers in an
+// environment only when Environments[env].Enabled is true. There is no
+// global enabled flag.
 type forwarderFileShape struct {
-	ID            string                          `json:"id,omitempty"`
-	Name          string                          `json:"name,omitempty"`
-	Description   *string                         `json:"description,omitempty"`
-	Type          string                          `json:"type,omitempty"`
-	Enabled       *bool                           `json:"enabled,omitempty"`
+	ID            string                           `json:"id,omitempty"`
+	Name          string                           `json:"name,omitempty"`
+	Description   *string                          `json:"description,omitempty"`
+	Type          string                           `json:"type,omitempty"`
+	Environments  map[string]forwarderEnvFileShape `json:"environments,omitempty"`
+	Configuration *output.ForwarderHTTPConfigAttr  `json:"configuration,omitempty"`
+	Filter        map[string]interface{}           `json:"filter,omitempty"`
+	Transform     interface{}                      `json:"transform,omitempty"`
+	TransformType *string                          `json:"transform_type,omitempty"`
+}
+
+// forwarderEnvFileShape is the per-environment override carried in the
+// `-f` file. A nil Configuration inherits the base configuration.
+type forwarderEnvFileShape struct {
+	Enabled       bool                            `json:"enabled"`
 	Configuration *output.ForwarderHTTPConfigAttr `json:"configuration,omitempty"`
-	Filter        map[string]interface{}          `json:"filter,omitempty"`
-	Transform     interface{}                     `json:"transform,omitempty"`
-	TransformType *string                         `json:"transform_type,omitempty"`
 }
 
 func registerAuditCmd(root *cobra.Command) {
@@ -50,16 +61,11 @@ func forwarderListCmd() *cobra.Command {
 		limit      int
 		all        bool
 		filterType string
-		enabled    bool
-		disabled   bool
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List SIEM forwarders",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if enabled && disabled {
-				return fmt.Errorf("--enabled and --disabled are mutually exclusive")
-			}
 			client, err := withClient()
 			if err != nil {
 				return err
@@ -69,10 +75,6 @@ func forwarderListCmd() *cobra.Command {
 			input := smplkit.ListForwardersInput{}
 			if filterType != "" {
 				input.ForwarderType = smplkit.ForwarderType(filterType)
-			}
-			if enabled || disabled {
-				v := enabled
-				input.Enabled = &v
 			}
 			var forwarders []smplkit.Forwarder
 			if all {
@@ -96,8 +98,6 @@ func forwarderListCmd() *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 0, "page size (server default when unset)")
 	cmd.Flags().BoolVar(&all, "all", false, "fetch every page")
 	cmd.Flags().StringVar(&filterType, "type", "", "filter by forwarder type")
-	cmd.Flags().BoolVar(&enabled, "enabled", false, "only enabled forwarders")
-	cmd.Flags().BoolVar(&disabled, "disabled", false, "only disabled forwarders")
 	return cmd
 }
 
@@ -150,7 +150,8 @@ func forwarderCreateCmd() *cobra.Command {
 		filterRaw     string
 		transformRaw  string
 		transformType string
-		enabledFlag   bool
+		enableEnvs    []string
+		disableEnvs   []string
 		description   string
 		method        string
 		successStatus string
@@ -161,7 +162,10 @@ func forwarderCreateCmd() *cobra.Command {
 		Long: "Creates a forwarder. -f forwarder.json carries the full definition (recommended\n" +
 			"for Datadog/Splunk/Honeycomb/etc. since the URL/headers vary). For Custom HTTP,\n" +
 			"the scalar flags are usually enough: --type http --url ... --header k=v.\n" +
-			"Where both are supplied, scalar flags override file values.",
+			"Where both are supplied, scalar flags override file values.\n\n" +
+			"Enablement is per-environment: a forwarder delivers only in environments\n" +
+			"turned on via --enable-env <env> (repeatable) or the file's `environments`\n" +
+			"map. Without any enabled environment the forwarder delivers nowhere.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
@@ -184,11 +188,11 @@ func forwarderCreateCmd() *cobra.Command {
 				filterRaw:     filterRaw,
 				transformRaw:  transformRaw,
 				transformType: transformType,
-				enabled:       enabledFlag,
+				enableEnvs:    enableEnvs,
+				disableEnvs:   disableEnvs,
 				description:   description,
 				method:        method,
 				successStatus: successStatus,
-				enabledSet:    cmd.Flags().Changed("enabled"),
 				methodSet:     cmd.Flags().Changed("method"),
 				successSet:    cmd.Flags().Changed("success-status"),
 			})
@@ -203,7 +207,7 @@ func forwarderCreateCmd() *cobra.Command {
 		},
 	}
 	addForwarderScalarFlags(cmd, &file, &fType, &name, &url, &headers,
-		&filterRaw, &transformRaw, &transformType, &enabledFlag,
+		&filterRaw, &transformRaw, &transformType, &enableEnvs, &disableEnvs,
 		&description, &method, &successStatus)
 	return cmd
 }
@@ -217,8 +221,8 @@ func forwarderSetCmd() *cobra.Command {
 		filterRaw     string
 		transformRaw  string
 		transformType string
-		enabledFlag   bool
-		disabledFlag  bool
+		enableEnvs    []string
+		disableEnvs   []string
 		description   string
 		method        string
 		successStatus string
@@ -231,13 +235,6 @@ func forwarderSetCmd() *cobra.Command {
 		Short: "Update a SIEM forwarder (read-modify-write)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// `--enabled` defaults to true (sensible for `create`), so
-			// `enabledFlag && disabledFlag` would trip every time
-			// `--disabled` is passed alone. Compare on the user's
-			// intent — were both explicitly set on the command line?
-			if cmd.Flags().Changed("enabled") && cmd.Flags().Changed("disabled") {
-				return fmt.Errorf("--enabled and --disabled are mutually exclusive")
-			}
 			id := args[0]
 			client, err := withClient()
 			if err != nil {
@@ -265,18 +262,13 @@ func forwarderSetCmd() *cobra.Command {
 				filterRaw:     filterRaw,
 				transformRaw:  transformRaw,
 				transformType: transformType,
+				enableEnvs:    enableEnvs,
+				disableEnvs:   disableEnvs,
 				description:   description,
 				method:        method,
 				successStatus: successStatus,
-				enabledSet:    cmd.Flags().Changed("enabled") || cmd.Flags().Changed("disabled"),
 				methodSet:     cmd.Flags().Changed("method"),
 				successSet:    cmd.Flags().Changed("success-status"),
-			}
-			if cmd.Flags().Changed("enabled") {
-				inputs.enabled = enabledFlag
-			}
-			if cmd.Flags().Changed("disabled") {
-				inputs.enabled = !disabledFlag
 			}
 			if err := applyForwarderInputsToModel(fwd, inputs, cmd); err != nil {
 				return err
@@ -289,9 +281,8 @@ func forwarderSetCmd() *cobra.Command {
 		},
 	}
 	addForwarderScalarFlags(cmd, &file, &fType, &name, &url, &headers,
-		&filterRaw, &transformRaw, &transformType, &enabledFlag,
+		&filterRaw, &transformRaw, &transformType, &enableEnvs, &disableEnvs,
 		&description, &method, &successStatus)
-	cmd.Flags().BoolVar(&disabledFlag, "disabled", false, "disable the forwarder")
 	// --type lives on the flag set so help text mirrors create, but
 	// changing the type after creation is rejected server-side.
 	_ = cmd.Flags().MarkHidden("type")
@@ -336,8 +327,8 @@ type forwarderInputs struct {
 	filterRaw     string
 	transformRaw  string
 	transformType string
-	enabled       bool
-	enabledSet    bool
+	enableEnvs    []string
+	disableEnvs   []string
 	description   string
 	method        string
 	methodSet     bool
@@ -347,7 +338,7 @@ type forwarderInputs struct {
 
 func addForwarderScalarFlags(cmd *cobra.Command, file, fType, name, url *string,
 	headers *[]string, filterRaw, transformRaw, transformType *string,
-	enabled *bool, description, method, successStatus *string) {
+	enableEnvs, disableEnvs *[]string, description, method, successStatus *string) {
 
 	cmd.Flags().StringVarP(file, "file", "f", "", "load full definition from JSON file")
 	cmd.Flags().StringVar(fType, "type", "", "forwarder type: datadog|elastic|honeycomb|http|new_relic|splunk_hec|sumo_logic")
@@ -357,7 +348,8 @@ func addForwarderScalarFlags(cmd *cobra.Command, file, fType, name, url *string,
 	cmd.Flags().StringVar(filterRaw, "filter", "", "JSON Logic filter from JSON or @file")
 	cmd.Flags().StringVar(transformRaw, "transform", "", "JSONata template (or @file)")
 	cmd.Flags().StringVar(transformType, "transform-type", "", "transform engine: JSONATA")
-	cmd.Flags().BoolVar(enabled, "enabled", true, "deliver events to this forwarder (default true on create)")
+	cmd.Flags().StringSliceVar(enableEnvs, "enable-env", nil, "enable delivery in an environment (repeatable)")
+	cmd.Flags().StringSliceVar(disableEnvs, "disable-env", nil, "disable delivery in an environment (repeatable)")
 	cmd.Flags().StringVar(description, "description", "", "free-text description")
 	cmd.Flags().StringVar(method, "method", "", "HTTP method: GET|POST|PUT|PATCH|DELETE (server default: POST)")
 	cmd.Flags().StringVar(successStatus, "success-status", "", "success HTTP status: exact (\"200\") or class (\"2xx\")")
@@ -408,10 +400,12 @@ func buildForwarderForCreate(ns *smplkit.AuditForwarders, id string, shape *forw
 	}
 
 	opts := []smplkit.ForwarderOption{}
-	if in.enabledSet {
-		opts = append(opts, smplkit.WithForwarderEnabled(in.enabled))
-	} else if shape != nil && shape.Enabled != nil {
-		opts = append(opts, smplkit.WithForwarderEnabled(*shape.Enabled))
+	envs, eerr := buildForwarderEnvironments(shape, in)
+	if eerr != nil {
+		return nil, eerr
+	}
+	if len(envs) > 0 {
+		opts = append(opts, smplkit.WithForwarderEnvironments(envs))
 	}
 	if in.description != "" {
 		opts = append(opts, smplkit.WithForwarderDescription(in.description))
@@ -434,6 +428,94 @@ func buildForwarderForCreate(ns *smplkit.AuditForwarders, id string, shape *forw
 	return ns.New(id, effName, ft, cfg, opts...), nil
 }
 
+// fileEnvShapeToConfig converts the file/CLI HTTP-config attribute shape
+// into the SDK's HttpConfiguration used for per-environment overrides.
+func fileEnvShapeToConfig(c *output.ForwarderHTTPConfigAttr) *smplkit.HttpConfiguration {
+	if c == nil {
+		return nil
+	}
+	cfg := smplkit.HttpConfiguration{
+		URL:           c.URL,
+		Method:        c.Method,
+		SuccessStatus: c.SuccessStatus,
+		TlsVerify:     c.TLSVerify,
+		CaCert:        c.CACert,
+	}
+	for _, h := range c.Headers {
+		cfg.Headers = append(cfg.Headers, smplkit.HttpHeader{Name: h.Name, Value: h.Value})
+	}
+	return &cfg
+}
+
+// fileEnvsToModel converts the file shape's environments map into the
+// SDK's per-environment override map.
+func fileEnvsToModel(envs map[string]forwarderEnvFileShape) map[string]smplkit.ForwarderEnvironment {
+	if envs == nil {
+		return nil
+	}
+	out := make(map[string]smplkit.ForwarderEnvironment, len(envs))
+	for k, e := range envs {
+		out[k] = smplkit.ForwarderEnvironment{
+			Enabled:       e.Enabled,
+			Configuration: fileEnvShapeToConfig(e.Configuration),
+		}
+	}
+	return out
+}
+
+// buildForwarderEnvironments assembles the per-environment override map
+// for a create from the -f file's `environments` plus the --enable-env /
+// --disable-env scalar flags (flags win where they overlap the file).
+func buildForwarderEnvironments(shape *forwarderFileShape, in forwarderInputs) (map[string]smplkit.ForwarderEnvironment, error) {
+	var envs map[string]smplkit.ForwarderEnvironment
+	if shape != nil && shape.Environments != nil {
+		envs = fileEnvsToModel(shape.Environments)
+	}
+	if len(in.enableEnvs) == 0 && len(in.disableEnvs) == 0 {
+		return envs, nil
+	}
+	if envs == nil {
+		envs = make(map[string]smplkit.ForwarderEnvironment)
+	}
+	tmp := &smplkit.Forwarder{Environments: envs}
+	if err := applyEnvToggles(tmp, in.enableEnvs, in.disableEnvs); err != nil {
+		return nil, err
+	}
+	return tmp.Environments, nil
+}
+
+// applyEnvToggles flips the enabled bit for the named environments on a
+// forwarder's Environments map, preserving any existing per-environment
+// configuration override. --enable-env and --disable-env may not name
+// the same environment.
+func applyEnvToggles(f *smplkit.Forwarder, enableEnvs, disableEnvs []string) error {
+	if len(enableEnvs) == 0 && len(disableEnvs) == 0 {
+		return nil
+	}
+	for _, e := range enableEnvs {
+		for _, d := range disableEnvs {
+			if e == d {
+				return fmt.Errorf("environment %q given to both --enable-env and --disable-env", e)
+			}
+		}
+	}
+	if f.Environments == nil {
+		f.Environments = make(map[string]smplkit.ForwarderEnvironment)
+	}
+	setEnabled := func(env string, enabled bool) {
+		cur := f.Environments[env]
+		cur.Enabled = enabled
+		f.Environments[env] = cur
+	}
+	for _, env := range enableEnvs {
+		setEnabled(env, true)
+	}
+	for _, env := range disableEnvs {
+		setEnabled(env, false)
+	}
+	return nil
+}
+
 func applyForwarderFileToModel(f *smplkit.Forwarder, shape *forwarderFileShape) {
 	if shape == nil {
 		return
@@ -444,8 +526,8 @@ func applyForwarderFileToModel(f *smplkit.Forwarder, shape *forwarderFileShape) 
 	if shape.Description != nil {
 		f.Description = shape.Description
 	}
-	if shape.Enabled != nil {
-		f.Enabled = *shape.Enabled
+	if shape.Environments != nil {
+		f.Environments = fileEnvsToModel(shape.Environments)
 	}
 	if shape.Filter != nil {
 		f.Filter = shape.Filter
@@ -489,8 +571,8 @@ func applyForwarderInputsToModel(f *smplkit.Forwarder, in forwarderInputs, cmd *
 		d := in.description
 		f.Description = &d
 	}
-	if in.enabledSet {
-		f.Enabled = in.enabled
+	if err := applyEnvToggles(f, in.enableEnvs, in.disableEnvs); err != nil {
+		return err
 	}
 	if cmd.Flags().Changed("url") {
 		f.Configuration.URL = in.url

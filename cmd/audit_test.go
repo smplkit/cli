@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	smplkit "github.com/smplkit/go-sdk/v3"
+
+	"github.com/smplkit/cli/internal/output"
 )
 
 func TestParseForwarderType_Variants(t *testing.T) {
@@ -62,21 +64,131 @@ func TestLoadTransformValue_JSONataIsStringVerbatim(t *testing.T) {
 }
 
 func TestApplyForwarderFileToModel_OverridesWhenSet(t *testing.T) {
-	enabled := false
 	desc := "edited"
 	shape := &forwarderFileShape{
 		Name:        "renamed",
 		Description: &desc,
-		Enabled:     &enabled,
+		Environments: map[string]forwarderEnvFileShape{
+			"production": {Enabled: true},
+			"staging":    {Enabled: false},
+		},
 	}
 	fwd := &smplkit.Forwarder{
-		ID:      "siem",
-		Name:    "siem",
-		Enabled: true,
+		ID:   "siem",
+		Name: "siem",
 	}
 	applyForwarderFileToModel(fwd, shape)
-	if fwd.Name != "renamed" || fwd.Enabled != false || fwd.Description == nil || *fwd.Description != "edited" {
+	if fwd.Name != "renamed" || fwd.Description == nil || *fwd.Description != "edited" {
 		t.Errorf("unexpected: %+v", fwd)
+	}
+	if !fwd.Environments["production"].Enabled {
+		t.Errorf("production should be enabled: %+v", fwd.Environments)
+	}
+	if fwd.Environments["staging"].Enabled {
+		t.Errorf("staging should be disabled: %+v", fwd.Environments)
+	}
+}
+
+func TestApplyForwarderFileToModel_PerEnvConfigOverride(t *testing.T) {
+	tlsVerify := false
+	shape := &forwarderFileShape{
+		Environments: map[string]forwarderEnvFileShape{
+			"production": {
+				Enabled: true,
+				Configuration: &output.ForwarderHTTPConfigAttr{
+					URL:           "https://prod.example.com/ingest",
+					Method:        "PUT",
+					SuccessStatus: "2xx",
+					TLSVerify:     &tlsVerify,
+					Headers: []output.ForwarderHeaderAttr{
+						{Name: "X-Env", Value: "prod"},
+					},
+				},
+			},
+		},
+	}
+	fwd := &smplkit.Forwarder{ID: "siem", Name: "siem"}
+	applyForwarderFileToModel(fwd, shape)
+
+	prod, ok := fwd.Environments["production"]
+	if !ok || !prod.Enabled {
+		t.Fatalf("production env missing/disabled: %+v", fwd.Environments)
+	}
+	if prod.Configuration == nil {
+		t.Fatal("per-env configuration override should be set")
+	}
+	if prod.Configuration.URL != "https://prod.example.com/ingest" {
+		t.Errorf("url: %q", prod.Configuration.URL)
+	}
+	if prod.Configuration.Method != "PUT" || prod.Configuration.SuccessStatus != "2xx" {
+		t.Errorf("method/status: %+v", prod.Configuration)
+	}
+	if prod.Configuration.TlsVerify == nil || *prod.Configuration.TlsVerify {
+		t.Errorf("tls_verify should be false: %+v", prod.Configuration.TlsVerify)
+	}
+	if len(prod.Configuration.Headers) != 1 || prod.Configuration.Headers[0].Name != "X-Env" {
+		t.Errorf("headers: %+v", prod.Configuration.Headers)
+	}
+}
+
+func TestApplyEnvToggles_EnableDisablePreservingConfig(t *testing.T) {
+	url := "https://override.example.com"
+	fwd := &smplkit.Forwarder{
+		Environments: map[string]smplkit.ForwarderEnvironment{
+			"production": {Enabled: false, Configuration: &smplkit.HttpConfiguration{URL: url}},
+		},
+	}
+	if err := applyEnvToggles(fwd, []string{"production", "staging"}, []string{"dev"}); err != nil {
+		t.Fatalf("applyEnvToggles: %v", err)
+	}
+	prod := fwd.Environments["production"]
+	if !prod.Enabled {
+		t.Error("production should be enabled")
+	}
+	if prod.Configuration == nil || prod.Configuration.URL != url {
+		t.Errorf("production config override must be preserved: %+v", prod.Configuration)
+	}
+	if !fwd.Environments["staging"].Enabled {
+		t.Error("staging should be enabled (new entry)")
+	}
+	if fwd.Environments["dev"].Enabled {
+		t.Error("dev should be disabled")
+	}
+}
+
+func TestApplyEnvToggles_RejectsOverlap(t *testing.T) {
+	fwd := &smplkit.Forwarder{}
+	err := applyEnvToggles(fwd, []string{"production"}, []string{"production"})
+	if err == nil {
+		t.Fatal("expected error when an env is both enabled and disabled")
+	}
+	if !strings.Contains(err.Error(), "production") {
+		t.Errorf("error should name the offending env, got %v", err)
+	}
+}
+
+func TestBuildForwarderEnvironments_FileAndFlagsMerge(t *testing.T) {
+	shape := &forwarderFileShape{
+		Environments: map[string]forwarderEnvFileShape{
+			"production": {Enabled: true},
+			"staging":    {Enabled: true},
+		},
+	}
+	envs, err := buildForwarderEnvironments(shape, forwarderInputs{
+		disableEnvs: []string{"staging"},
+		enableEnvs:  []string{"dev"},
+	})
+	if err != nil {
+		t.Fatalf("buildForwarderEnvironments: %v", err)
+	}
+	if !envs["production"].Enabled {
+		t.Error("production (file) should stay enabled")
+	}
+	if envs["staging"].Enabled {
+		t.Error("staging should be disabled by flag")
+	}
+	if !envs["dev"].Enabled {
+		t.Error("dev should be enabled by flag")
 	}
 }
 
@@ -90,22 +202,30 @@ func TestParseForwarderType_ErrorIncludesValidList(t *testing.T) {
 	}
 }
 
-// Regression: --disabled alone on `audit forwarder set` must not
-// trip the mutual-exclusion check, even though --enabled defaults to
-// true. The check now keys off cmd.Flags().Changed(...) instead of
-// the raw bool values. Lives at the cmd level rather than down in a
-// helper because the bug was the surface-level cobra wiring.
-func TestForwarderSetCmd_DisabledAloneIsAccepted(t *testing.T) {
+// `audit forwarder set` exposes per-environment enablement via the
+// repeatable --enable-env / --disable-env flags (ADR-055); the old
+// global --enabled / --disabled toggles are gone. Verify the new flags
+// are wired and parse as a string slice.
+func TestForwarderSetCmd_EnvFlagsWired(t *testing.T) {
 	cmd := forwarderSetCmd()
-	// Parse args so cmd.Flags().Changed("disabled") is true and
-	// "enabled" is false (it stays at its declared default).
-	if err := cmd.ParseFlags([]string{"--disabled"}); err != nil {
+	if cmd.Flags().Lookup("enabled") != nil || cmd.Flags().Lookup("disabled") != nil {
+		t.Fatal("legacy --enabled/--disabled flags must be removed")
+	}
+	if err := cmd.ParseFlags([]string{"--enable-env", "production", "--disable-env", "staging"}); err != nil {
 		t.Fatalf("ParseFlags: %v", err)
 	}
-	if !cmd.Flags().Changed("disabled") {
-		t.Fatal("--disabled should be marked Changed after parse")
+	enable, err := cmd.Flags().GetStringSlice("enable-env")
+	if err != nil {
+		t.Fatalf("GetStringSlice enable-env: %v", err)
 	}
-	if cmd.Flags().Changed("enabled") {
-		t.Fatal("--enabled should NOT be marked Changed (we didn't pass it)")
+	disable, err := cmd.Flags().GetStringSlice("disable-env")
+	if err != nil {
+		t.Fatalf("GetStringSlice disable-env: %v", err)
+	}
+	if len(enable) != 1 || enable[0] != "production" {
+		t.Errorf("enable-env = %v", enable)
+	}
+	if len(disable) != 1 || disable[0] != "staging" {
+		t.Errorf("disable-env = %v", disable)
 	}
 }

@@ -333,29 +333,50 @@ func TestAccAuditForwarder_CRUD(t *testing.T) {
 	id := uniqueID(t, "fwd")
 	t.Cleanup(func() { _ = deleteSilent(t, "audit", "forwarder", id) })
 
+	// Enablement is per-environment (ADR-055). `production` is a seeded,
+	// managed environment present on every fresh account and cannot be
+	// deleted, so it's a stable target for --enable-env / --disable-env.
+	const env = "production"
+
 	mustRun(t, "audit", "forwarder", "create", id,
 		"--type", "http",
 		"--name", "Acc Forwarder",
 		"--url", "https://example.com/ingest",
-		"--header", "X-Source=cli")
+		"--header", "X-Source=cli",
+		"--enable-env", env)
 
 	out := mustRun(t, "audit", "forwarder", "get", id, "-o", "json")
 	var f map[string]interface{}
 	if err := json.Unmarshal([]byte(out), &f); err != nil {
 		t.Fatalf("parse: %v\n%s", err, out)
 	}
-	if f["enabled"] != true {
-		t.Errorf("expected enabled true: %v", f)
+	if !forwarderEnvEnabled(f, env) {
+		t.Errorf("expected %s enabled true: %v", env, f)
 	}
 
-	mustRun(t, "audit", "forwarder", "set", id, "--disabled")
+	mustRun(t, "audit", "forwarder", "set", id, "--disable-env", env)
 	out = mustRun(t, "audit", "forwarder", "get", id, "-o", "json")
 	_ = json.Unmarshal([]byte(out), &f)
-	if f["enabled"] != false {
-		t.Errorf("expected enabled false: %v", f)
+	if forwarderEnvEnabled(f, env) {
+		t.Errorf("expected %s enabled false after --disable-env: %v", env, f)
 	}
 
 	mustRun(t, "audit", "forwarder", "delete", id, "--yes")
+}
+
+// forwarderEnvEnabled reports whether the forwarder JSON has the named
+// environment enabled in its `environments` map.
+func forwarderEnvEnabled(f map[string]interface{}, env string) bool {
+	envs, ok := f["environments"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	entry, ok := envs[env].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	enabled, _ := entry["enabled"].(bool)
+	return enabled
 }
 
 // ─── Logger ──────────────────────────────────────────────────────────

@@ -99,7 +99,10 @@ func TestRenderer_Forwarder_Table(t *testing.T) {
 		ID:            "siem",
 		Name:          "SIEM",
 		ForwarderType: smplkit.ForwarderTypeHTTP,
-		Enabled:       true,
+		Environments: map[string]smplkit.ForwarderEnvironment{
+			"production": {Enabled: true},
+			"staging":    {Enabled: false},
+		},
 		Configuration: smplkit.HttpConfiguration{URL: "https://example.com"},
 	}
 	var buf bytes.Buffer
@@ -110,6 +113,42 @@ func TestRenderer_Forwarder_Table(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "siem") || !strings.Contains(out, "https://example.com") {
 		t.Errorf("table missing rows: %q", out)
+	}
+	if !strings.Contains(out, "ENABLED ENVS") {
+		t.Errorf("table missing enabled-envs header: %q", out)
+	}
+	// Only enabled environments appear in the column.
+	if !strings.Contains(out, "production") || strings.Contains(out, "staging") {
+		t.Errorf("enabled-envs column should list production only: %q", out)
+	}
+}
+
+func TestRenderer_Forwarder_JSON_Environments(t *testing.T) {
+	override := smplkit.HttpConfiguration{URL: "https://prod.example.com"}
+	fwd := smplkit.Forwarder{
+		ID:            "siem",
+		Name:          "SIEM",
+		ForwarderType: smplkit.ForwarderTypeHTTP,
+		Environments: map[string]smplkit.ForwarderEnvironment{
+			"production": {Enabled: true, Configuration: &override},
+		},
+		Configuration: smplkit.HttpConfiguration{URL: "https://base.example.com"},
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputJSON, false)
+	if err := r.RenderForwarder(&fwd); err != nil {
+		t.Fatalf("RenderForwarder: %v", err)
+	}
+	var got ForwarderAttr
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	prod, ok := got.Environments["production"]
+	if !ok || !prod.Enabled {
+		t.Fatalf("production env missing or not enabled: %+v", got.Environments)
+	}
+	if prod.Configuration == nil || prod.Configuration.URL != "https://prod.example.com" {
+		t.Errorf("per-env configuration override not projected: %+v", prod.Configuration)
 	}
 }
 
