@@ -343,7 +343,8 @@ func TestAccAuditForwarder_CRUD(t *testing.T) {
 		"--name", "Acc Forwarder",
 		"--url", "https://example.com/ingest",
 		"--header", "X-Source=cli",
-		"--enable-env", env)
+		"--enable-env", env,
+		"--forward-smplkit-events")
 
 	out := mustRun(t, "audit", "forwarder", "get", id, "-o", "json")
 	var f map[string]interface{}
@@ -353,12 +354,23 @@ func TestAccAuditForwarder_CRUD(t *testing.T) {
 	if !forwarderEnvEnabled(f, env) {
 		t.Errorf("expected %s enabled true: %v", env, f)
 	}
+	if v, _ := f["forward_smplkit_events"].(bool); !v {
+		t.Errorf("expected forward_smplkit_events true after create: %v", f)
+	}
 
-	mustRun(t, "audit", "forwarder", "set", id, "--disable-env", env)
+	// Toggle the opt-in back off via set, and disable the env.
+	mustRun(t, "audit", "forwarder", "set", id,
+		"--disable-env", env,
+		"--forward-smplkit-events=false")
 	out = mustRun(t, "audit", "forwarder", "get", id, "-o", "json")
 	_ = json.Unmarshal([]byte(out), &f)
 	if forwarderEnvEnabled(f, env) {
 		t.Errorf("expected %s enabled false after --disable-env: %v", env, f)
+	}
+	// forward_smplkit_events=false is omitempty in JSON output (nil/false),
+	// so its absence (or explicit false) both mean "off".
+	if v, _ := f["forward_smplkit_events"].(bool); v {
+		t.Errorf("expected forward_smplkit_events false after set: %v", f)
 	}
 
 	mustRun(t, "audit", "forwarder", "delete", id, "--yes")

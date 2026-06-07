@@ -545,9 +545,14 @@ type ForwarderAttr struct {
 	Filter        map[string]interface{}          `json:"filter,omitempty" yaml:"filter,omitempty"`
 	Transform     interface{}                     `json:"transform,omitempty" yaml:"transform,omitempty"`
 	TransformType *smplkit.ForwarderTransformType `json:"transform_type,omitempty" yaml:"transform_type,omitempty"`
-	CreatedAt     *time.Time                      `json:"created_at,omitempty" yaml:"created_at,omitempty"`
-	UpdatedAt     *time.Time                      `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
-	Version       *int                            `json:"version,omitempty" yaml:"version,omitempty"`
+	// ForwardSmplkitEvents, when true, also delivers smplkit's own
+	// platform change events (flag, configuration, and similar changes)
+	// through this forwarder. Nil/false (the default) means they are not
+	// forwarded.
+	ForwardSmplkitEvents *bool      `json:"forward_smplkit_events,omitempty" yaml:"forward_smplkit_events,omitempty"`
+	CreatedAt            *time.Time `json:"created_at,omitempty" yaml:"created_at,omitempty"`
+	UpdatedAt            *time.Time `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
+	Version              *int       `json:"version,omitempty" yaml:"version,omitempty"`
 }
 
 // ForwarderEnvAttr is the JSON/YAML shape for a per-environment override.
@@ -606,18 +611,19 @@ func ForwarderToAttr(f *smplkit.Forwarder) ForwarderAttr {
 		}
 	}
 	return ForwarderAttr{
-		ID:            f.ID,
-		Name:          f.Name,
-		Description:   f.Description,
-		ForwarderType: f.ForwarderType,
-		Environments:  envs,
-		Configuration: httpConfigToAttr(f.Configuration),
-		Filter:        f.Filter,
-		Transform:     f.Transform,
-		TransformType: f.TransformType,
-		CreatedAt:     f.CreatedAt,
-		UpdatedAt:     f.UpdatedAt,
-		Version:       f.Version,
+		ID:                   f.ID,
+		Name:                 f.Name,
+		Description:          f.Description,
+		ForwarderType:        f.ForwarderType,
+		Environments:         envs,
+		Configuration:        httpConfigToAttr(f.Configuration),
+		Filter:               f.Filter,
+		Transform:            f.Transform,
+		TransformType:        f.TransformType,
+		ForwardSmplkitEvents: f.ForwardSmplkitEvents,
+		CreatedAt:            f.CreatedAt,
+		UpdatedAt:            f.UpdatedAt,
+		Version:              f.Version,
 	}
 }
 
@@ -655,11 +661,13 @@ func (r Renderer) RenderForwarders(fs []smplkit.Forwarder) error {
 
 func (r Renderer) renderForwarderTable(fs []smplkit.Forwarder) error {
 	tw := newTabWriter(r.Out)
-	fmt.Fprintln(tw, "ID\tNAME\tTYPE\tENABLED ENVS\tURL")
+	fmt.Fprintln(tw, "ID\tNAME\tTYPE\tENABLED ENVS\tSMPL EVENTS\tURL")
 	for _, f := range fs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%t\t%s\n",
 			f.ID, f.Name, string(f.ForwarderType),
-			strings.Join(enabledEnvKeys(f.Environments), ","), f.Configuration.URL)
+			strings.Join(enabledEnvKeys(f.Environments), ","),
+			f.ForwardSmplkitEvents != nil && *f.ForwardSmplkitEvents,
+			f.Configuration.URL)
 	}
 	return tw.Flush()
 }

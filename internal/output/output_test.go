@@ -95,6 +95,7 @@ func TestRenderer_Environment_YAML(t *testing.T) {
 }
 
 func TestRenderer_Forwarder_Table(t *testing.T) {
+	forward := true
 	fwd := smplkit.Forwarder{
 		ID:            "siem",
 		Name:          "SIEM",
@@ -103,7 +104,8 @@ func TestRenderer_Forwarder_Table(t *testing.T) {
 			"production": {Enabled: true},
 			"staging":    {Enabled: false},
 		},
-		Configuration: smplkit.HttpConfiguration{URL: "https://example.com"},
+		ForwardSmplkitEvents: &forward,
+		Configuration:        smplkit.HttpConfiguration{URL: "https://example.com"},
 	}
 	var buf bytes.Buffer
 	r := NewRenderer(&buf, cliconfig.OutputTable, false)
@@ -117,9 +119,59 @@ func TestRenderer_Forwarder_Table(t *testing.T) {
 	if !strings.Contains(out, "ENABLED ENVS") {
 		t.Errorf("table missing enabled-envs header: %q", out)
 	}
+	if !strings.Contains(out, "SMPL EVENTS") {
+		t.Errorf("table missing smpl-events header: %q", out)
+	}
+	// forward_smplkit_events=true renders as "true" in its column.
+	if !strings.Contains(out, "true") {
+		t.Errorf("smpl-events column should show true: %q", out)
+	}
 	// Only enabled environments appear in the column.
 	if !strings.Contains(out, "production") || strings.Contains(out, "staging") {
 		t.Errorf("enabled-envs column should list production only: %q", out)
+	}
+}
+
+func TestRenderer_Forwarder_Table_SmplEventsFalseWhenNil(t *testing.T) {
+	fwd := smplkit.Forwarder{
+		ID:            "siem",
+		Name:          "SIEM",
+		ForwarderType: smplkit.ForwarderTypeHTTP,
+		Configuration: smplkit.HttpConfiguration{URL: "https://example.com"},
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputTable, false)
+	if err := r.RenderForwarder(&fwd); err != nil {
+		t.Fatalf("RenderForwarder: %v", err)
+	}
+	if !strings.Contains(buf.String(), "false") {
+		t.Errorf("nil ForwardSmplkitEvents should render as false: %q", buf.String())
+	}
+}
+
+func TestRenderer_Forwarder_JSON_SmplEvents(t *testing.T) {
+	forward := true
+	fwd := smplkit.Forwarder{
+		ID:                   "siem",
+		Name:                 "SIEM",
+		ForwarderType:        smplkit.ForwarderTypeHTTP,
+		ForwardSmplkitEvents: &forward,
+		Configuration:        smplkit.HttpConfiguration{URL: "https://example.com"},
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputJSON, false)
+	if err := r.RenderForwarder(&fwd); err != nil {
+		t.Fatalf("RenderForwarder: %v", err)
+	}
+	var got ForwarderAttr
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.ForwardSmplkitEvents == nil || !*got.ForwardSmplkitEvents {
+		t.Errorf("forward_smplkit_events not projected: %+v", got.ForwardSmplkitEvents)
+	}
+	if !strings.Contains(buf.String(), "forward_smplkit_events") {
+		t.Errorf("JSON key forward_smplkit_events missing: %q", buf.String())
 	}
 }
 

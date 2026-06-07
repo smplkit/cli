@@ -29,6 +29,9 @@ type forwarderFileShape struct {
 	Filter        map[string]interface{}           `json:"filter,omitempty"`
 	Transform     interface{}                      `json:"transform,omitempty"`
 	TransformType *string                          `json:"transform_type,omitempty"`
+	// ForwardSmplkitEvents opts the forwarder into receiving smplkit's own
+	// platform change events in addition to your audit events.
+	ForwardSmplkitEvents *bool `json:"forward_smplkit_events,omitempty"`
 }
 
 // forwarderEnvFileShape is the per-environment override carried in the
@@ -142,19 +145,20 @@ func forwarderGetCmd() *cobra.Command {
 
 func forwarderCreateCmd() *cobra.Command {
 	var (
-		file          string
-		fType         string
-		name          string
-		url           string
-		headers       []string
-		filterRaw     string
-		transformRaw  string
-		transformType string
-		enableEnvs    []string
-		disableEnvs   []string
-		description   string
-		method        string
-		successStatus string
+		file                 string
+		fType                string
+		name                 string
+		url                  string
+		headers              []string
+		filterRaw            string
+		transformRaw         string
+		transformType        string
+		enableEnvs           []string
+		disableEnvs          []string
+		description          string
+		method               string
+		successStatus        string
+		forwardSmplkitEvents bool
 	)
 	cmd := &cobra.Command{
 		Use:   "create <key>",
@@ -181,20 +185,22 @@ func forwarderCreateCmd() *cobra.Command {
 			}
 
 			fwd, err := buildForwarderForCreate(ns, id, shape, forwarderInputs{
-				ftype:         fType,
-				name:          name,
-				url:           url,
-				headers:       headers,
-				filterRaw:     filterRaw,
-				transformRaw:  transformRaw,
-				transformType: transformType,
-				enableEnvs:    enableEnvs,
-				disableEnvs:   disableEnvs,
-				description:   description,
-				method:        method,
-				successStatus: successStatus,
-				methodSet:     cmd.Flags().Changed("method"),
-				successSet:    cmd.Flags().Changed("success-status"),
+				ftype:                fType,
+				name:                 name,
+				url:                  url,
+				headers:              headers,
+				filterRaw:            filterRaw,
+				transformRaw:         transformRaw,
+				transformType:        transformType,
+				enableEnvs:           enableEnvs,
+				disableEnvs:          disableEnvs,
+				description:          description,
+				method:               method,
+				successStatus:        successStatus,
+				methodSet:            cmd.Flags().Changed("method"),
+				successSet:           cmd.Flags().Changed("success-status"),
+				forwardSmplkitEvents: forwardSmplkitEvents,
+				forwardSmplkitSet:    cmd.Flags().Changed("forward-smplkit-events"),
 			})
 			if err != nil {
 				return err
@@ -208,24 +214,25 @@ func forwarderCreateCmd() *cobra.Command {
 	}
 	addForwarderScalarFlags(cmd, &file, &fType, &name, &url, &headers,
 		&filterRaw, &transformRaw, &transformType, &enableEnvs, &disableEnvs,
-		&description, &method, &successStatus)
+		&description, &method, &successStatus, &forwardSmplkitEvents)
 	return cmd
 }
 
 func forwarderSetCmd() *cobra.Command {
 	var (
-		file          string
-		name          string
-		url           string
-		headers       []string
-		filterRaw     string
-		transformRaw  string
-		transformType string
-		enableEnvs    []string
-		disableEnvs   []string
-		description   string
-		method        string
-		successStatus string
+		file                 string
+		name                 string
+		url                  string
+		headers              []string
+		filterRaw            string
+		transformRaw         string
+		transformType        string
+		enableEnvs           []string
+		disableEnvs          []string
+		description          string
+		method               string
+		successStatus        string
+		forwardSmplkitEvents bool
 		// Unused for set — kept here so the helper signature stays the
 		// same as create. (--type can't be changed via set.)
 		fType string
@@ -256,19 +263,21 @@ func forwarderSetCmd() *cobra.Command {
 			}
 
 			inputs := forwarderInputs{
-				name:          name,
-				url:           url,
-				headers:       headers,
-				filterRaw:     filterRaw,
-				transformRaw:  transformRaw,
-				transformType: transformType,
-				enableEnvs:    enableEnvs,
-				disableEnvs:   disableEnvs,
-				description:   description,
-				method:        method,
-				successStatus: successStatus,
-				methodSet:     cmd.Flags().Changed("method"),
-				successSet:    cmd.Flags().Changed("success-status"),
+				name:                 name,
+				url:                  url,
+				headers:              headers,
+				filterRaw:            filterRaw,
+				transformRaw:         transformRaw,
+				transformType:        transformType,
+				enableEnvs:           enableEnvs,
+				disableEnvs:          disableEnvs,
+				description:          description,
+				method:               method,
+				successStatus:        successStatus,
+				methodSet:            cmd.Flags().Changed("method"),
+				successSet:           cmd.Flags().Changed("success-status"),
+				forwardSmplkitEvents: forwardSmplkitEvents,
+				forwardSmplkitSet:    cmd.Flags().Changed("forward-smplkit-events"),
 			}
 			if err := applyForwarderInputsToModel(fwd, inputs, cmd); err != nil {
 				return err
@@ -282,7 +291,7 @@ func forwarderSetCmd() *cobra.Command {
 	}
 	addForwarderScalarFlags(cmd, &file, &fType, &name, &url, &headers,
 		&filterRaw, &transformRaw, &transformType, &enableEnvs, &disableEnvs,
-		&description, &method, &successStatus)
+		&description, &method, &successStatus, &forwardSmplkitEvents)
 	// --type lives on the flag set so help text mirrors create, but
 	// changing the type after creation is rejected server-side.
 	_ = cmd.Flags().MarkHidden("type")
@@ -334,11 +343,17 @@ type forwarderInputs struct {
 	methodSet     bool
 	successStatus string
 	successSet    bool
+	// forwardSmplkitEvents carries the --forward-smplkit-events flag.
+	// forwardSmplkitSet reports whether the flag was supplied so set
+	// (read-modify-write) leaves the field untouched when omitted.
+	forwardSmplkitEvents bool
+	forwardSmplkitSet    bool
 }
 
 func addForwarderScalarFlags(cmd *cobra.Command, file, fType, name, url *string,
 	headers *[]string, filterRaw, transformRaw, transformType *string,
-	enableEnvs, disableEnvs *[]string, description, method, successStatus *string) {
+	enableEnvs, disableEnvs *[]string, description, method, successStatus *string,
+	forwardSmplkitEvents *bool) {
 
 	cmd.Flags().StringVarP(file, "file", "f", "", "load full definition from JSON file")
 	cmd.Flags().StringVar(fType, "type", "", "forwarder type: datadog|elastic|honeycomb|http|new_relic|splunk_hec|sumo_logic")
@@ -353,6 +368,7 @@ func addForwarderScalarFlags(cmd *cobra.Command, file, fType, name, url *string,
 	cmd.Flags().StringVar(description, "description", "", "free-text description")
 	cmd.Flags().StringVar(method, "method", "", "HTTP method: GET|POST|PUT|PATCH|DELETE (server default: POST)")
 	cmd.Flags().StringVar(successStatus, "success-status", "", "success HTTP status: exact (\"200\") or class (\"2xx\")")
+	cmd.Flags().BoolVar(forwardSmplkitEvents, "forward-smplkit-events", false, "also forward smplkit platform change events (smpl.*) through this forwarder")
 }
 
 func loadForwarderFile(path string) (*forwarderFileShape, error) {
@@ -423,6 +439,11 @@ func buildForwarderForCreate(ns *smplkit.AuditForwarders, id string, shape *forw
 	}
 	if tValue != nil {
 		opts = append(opts, smplkit.WithForwarderTransform(tType, tValue))
+	}
+	if in.forwardSmplkitSet {
+		opts = append(opts, smplkit.WithForwardSmplkitEvents(in.forwardSmplkitEvents))
+	} else if shape != nil && shape.ForwardSmplkitEvents != nil {
+		opts = append(opts, smplkit.WithForwardSmplkitEvents(*shape.ForwardSmplkitEvents))
 	}
 
 	return ns.New(id, effName, ft, cfg, opts...), nil
@@ -539,6 +560,10 @@ func applyForwarderFileToModel(f *smplkit.Forwarder, shape *forwarderFileShape) 
 		tt := smplkit.ForwarderTransformType(*shape.TransformType)
 		f.TransformType = &tt
 	}
+	if shape.ForwardSmplkitEvents != nil {
+		v := *shape.ForwardSmplkitEvents
+		f.ForwardSmplkitEvents = &v
+	}
 	if shape.Configuration != nil {
 		f.Configuration.URL = firstNonEmpty(shape.Configuration.URL, f.Configuration.URL)
 		if shape.Configuration.Method != "" {
@@ -570,6 +595,10 @@ func applyForwarderInputsToModel(f *smplkit.Forwarder, in forwarderInputs, cmd *
 	if cmd.Flags().Changed("description") {
 		d := in.description
 		f.Description = &d
+	}
+	if in.forwardSmplkitSet {
+		v := in.forwardSmplkitEvents
+		f.ForwardSmplkitEvents = &v
 	}
 	if err := applyEnvToggles(f, in.enableEnvs, in.disableEnvs); err != nil {
 		return err

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	smplkit "github.com/smplkit/go-sdk/v3"
+	"github.com/spf13/cobra"
 
 	"github.com/smplkit/cli/internal/output"
 )
@@ -227,5 +228,93 @@ func TestForwarderSetCmd_EnvFlagsWired(t *testing.T) {
 	}
 	if len(disable) != 1 || disable[0] != "staging" {
 		t.Errorf("disable-env = %v", disable)
+	}
+}
+
+// Both create and set expose --forward-smplkit-events as a bool flag
+// defaulting to false.
+func TestForwarderCmds_ForwardSmplkitEventsFlagWired(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cmd  func() *cobra.Command
+	}{
+		{"create", forwarderCreateCmd},
+		{"set", forwarderSetCmd},
+	} {
+		cmd := tc.cmd()
+		f := cmd.Flags().Lookup("forward-smplkit-events")
+		if f == nil {
+			t.Fatalf("%s: --forward-smplkit-events flag missing", tc.name)
+		}
+		if f.DefValue != "false" {
+			t.Errorf("%s: default = %q, want false", tc.name, f.DefValue)
+		}
+		if err := cmd.ParseFlags([]string{"--forward-smplkit-events"}); err != nil {
+			t.Fatalf("%s: ParseFlags: %v", tc.name, err)
+		}
+		v, err := cmd.Flags().GetBool("forward-smplkit-events")
+		if err != nil {
+			t.Fatalf("%s: GetBool: %v", tc.name, err)
+		}
+		if !v {
+			t.Errorf("%s: flag should be true after --forward-smplkit-events", tc.name)
+		}
+	}
+}
+
+// buildForwarderForCreate sets ForwardSmplkitEvents when the flag is
+// supplied, and from the -f file when the flag is omitted.
+func TestBuildForwarderForCreate_ForwardSmplkitEvents(t *testing.T) {
+	ns := (*smplkit.AuditForwarders)(nil)
+
+	// Flag wins.
+	fwd, err := buildForwarderForCreate(ns, "siem", nil, forwarderInputs{
+		ftype:                "http",
+		url:                  "https://example.com",
+		forwardSmplkitEvents: true,
+		forwardSmplkitSet:    true,
+	})
+	if err != nil {
+		t.Fatalf("create (flag): %v", err)
+	}
+	if fwd.ForwardSmplkitEvents == nil || !*fwd.ForwardSmplkitEvents {
+		t.Errorf("flag should set ForwardSmplkitEvents=true, got %v", fwd.ForwardSmplkitEvents)
+	}
+
+	// File value used when flag omitted.
+	fileTrue := true
+	shape := &forwarderFileShape{ForwardSmplkitEvents: &fileTrue}
+	fwd2, err := buildForwarderForCreate(ns, "siem", shape, forwarderInputs{
+		ftype: "http",
+		url:   "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("create (file): %v", err)
+	}
+	if fwd2.ForwardSmplkitEvents == nil || !*fwd2.ForwardSmplkitEvents {
+		t.Errorf("file should set ForwardSmplkitEvents=true, got %v", fwd2.ForwardSmplkitEvents)
+	}
+
+	// Omitting both leaves it nil (prior behavior).
+	fwd3, err := buildForwarderForCreate(ns, "siem", nil, forwarderInputs{
+		ftype: "http",
+		url:   "https://example.com",
+	})
+	if err != nil {
+		t.Fatalf("create (default): %v", err)
+	}
+	if fwd3.ForwardSmplkitEvents != nil {
+		t.Errorf("default should leave ForwardSmplkitEvents nil, got %v", *fwd3.ForwardSmplkitEvents)
+	}
+}
+
+// applyForwarderFileToModel copies forward_smplkit_events from the file.
+func TestApplyForwarderFileToModel_ForwardSmplkitEvents(t *testing.T) {
+	forward := true
+	shape := &forwarderFileShape{ForwardSmplkitEvents: &forward}
+	fwd := &smplkit.Forwarder{ID: "siem", Name: "siem"}
+	applyForwarderFileToModel(fwd, shape)
+	if fwd.ForwardSmplkitEvents == nil || !*fwd.ForwardSmplkitEvents {
+		t.Errorf("file should set ForwardSmplkitEvents=true, got %v", fwd.ForwardSmplkitEvents)
 	}
 }
