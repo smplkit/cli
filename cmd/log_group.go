@@ -45,7 +45,7 @@ func logGroupListCmd() *cobra.Command {
 				return err
 			}
 			ctx := cliContext(cmd)
-			ns := client.LogGroups()
+			ns := client.Logging().LogGroups()
 			var groups []*smplkit.LogGroup
 			if all {
 				groups, err = paginate.All(ctx, ns.List, limit)
@@ -73,7 +73,7 @@ func logGroupGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			g, err := client.LogGroups().Get(cliContext(cmd), args[0])
+			g, err := client.Logging().LogGroups().Get(cliContext(cmd), args[0])
 			if err != nil {
 				return err
 			}
@@ -116,13 +116,13 @@ func logGroupCreateCmd() *cobra.Command {
 				opts = append(opts, smplkit.WithLogGroupParent(effParent))
 			}
 
-			g := client.LogGroups().New(id, opts...)
+			g := client.Logging().LogGroups().New(id, opts...)
 			if effLevel != "" {
 				lvl := smplkit.LogLevel(strings.ToUpper(effLevel))
 				if !validLogLevel(lvl) {
 					return fmt.Errorf("invalid --level %q", effLevel)
 				}
-				g.SetLevel(lvl)
+				g.SetLevel(lvl, "")
 			}
 			if err := g.Save(cliContext(cmd)); err != nil {
 				return err
@@ -157,7 +157,7 @@ func logGroupSetCmd() *cobra.Command {
 				return err
 			}
 			ctx := cliContext(cmd)
-			g, err := client.LogGroups().Get(ctx, id)
+			g, err := client.Logging().LogGroups().Get(ctx, id)
 			if err != nil {
 				return err
 			}
@@ -233,7 +233,7 @@ func logGroupDeleteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := client.LogGroups().Delete(cliContext(cmd), id); err != nil {
+			if err := client.Logging().LogGroups().Delete(cliContext(cmd), id); err != nil {
 				return err
 			}
 			if globals.Quiet {

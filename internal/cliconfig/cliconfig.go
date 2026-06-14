@@ -3,13 +3,13 @@
 // commands.
 //
 // Credential / endpoint resolution stays inside the SDK: every field on
-// ManagementConfig is left at its zero value unless the user explicitly
+// Config is left at its zero value unless the user explicitly
 // supplied the matching flag. That preserves the SDK's documented
 // precedence (defaults → ~/.smplkit → SMPLKIT_* → explicit).
 //
 // Environment resolution is the one thing the CLI re-implements,
-// because NewManagementClient deliberately drops Environment — the
-// management client itself never needs it, but env-scoped commands
+// because the CLI deliberately leaves Config.Environment unset — the
+// management surface itself never needs it, but env-scoped commands
 // (`flag set --enabled --env production`) do. We mirror the SDK's
 // precedence (flag → env var → profile → common) using the same INI
 // rules so the lookup behaves identically to what the SDK would do for

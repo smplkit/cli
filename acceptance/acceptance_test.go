@@ -128,14 +128,14 @@ func localBaseDomain() string {
 
 // managementClient builds an SDK client with the same routing the CLI
 // uses, for the side-channel verification tests do at the end.
-func managementClient(t *testing.T) *smplkit.ManagementClient {
+func managementClient(t *testing.T) *smplkit.SmplClient {
 	t.Helper()
-	cfg := smplkit.ManagementConfig{
+	cfg := smplkit.Config{
 		APIKey:     os.Getenv("SMPLKIT_API_KEY"),
 		Scheme:     localScheme(),
 		BaseDomain: localBaseDomain(),
 	}
-	client, err := smplkit.NewManagementClient(cfg)
+	client, err := smplkit.NewClient(cfg)
 	if err != nil {
 		t.Fatalf("management client: %v", err)
 	}
@@ -222,7 +222,7 @@ func TestAccEnvironment_CRUD(t *testing.T) {
 func freeManagedEnvironmentSlot(t *testing.T) {
 	t.Helper()
 	client := managementClient(t)
-	if err := client.Environments().Delete(context.Background(), "development"); err != nil {
+	if err := client.Platform().Environments().Delete(context.Background(), "development"); err != nil {
 		var nf *smplkit.NotFoundError
 		if !errors.As(err, &nf) {
 			t.Logf("dev env prep: %v (continuing)", err)

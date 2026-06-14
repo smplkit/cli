@@ -36,7 +36,7 @@ func loggerListCmd() *cobra.Command {
 				return err
 			}
 			ctx := cliContext(cmd)
-			ns := client.Loggers()
+			ns := client.Logging().Loggers()
 			var loggers []*smplkit.Logger
 			if all {
 				loggers, err = paginate.All(ctx, ns.List, limit)
@@ -64,7 +64,7 @@ func loggerGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			l, err := client.Loggers().Get(cliContext(cmd), args[0])
+			l, err := client.Logging().Loggers().Get(cliContext(cmd), args[0])
 			if err != nil {
 				return err
 			}
@@ -95,7 +95,7 @@ func loggerSetCmd() *cobra.Command {
 				return err
 			}
 			ctx := cliContext(cmd)
-			l, err := client.Loggers().Get(ctx, id)
+			l, err := client.Logging().Loggers().Get(ctx, id)
 			if err != nil {
 				return err
 			}
@@ -161,7 +161,7 @@ func loggerDeleteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := client.Loggers().Delete(cliContext(cmd), id); err != nil {
+			if err := client.Logging().Loggers().Delete(cliContext(cmd), id); err != nil {
 				return err
 			}
 			if globals.Quiet {

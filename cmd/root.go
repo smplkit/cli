@@ -73,10 +73,10 @@ func newRootCmd(version string) *cobra.Command {
 	return root
 }
 
-// withClient builds a fresh ManagementClient for a single command
+// withClient builds a fresh SmplClient for a single command
 // invocation. Cheap to construct — the SDK does no I/O at construction
 // — so we don't bother sharing one across the process.
-func withClient() (*smplkit.ManagementClient, error) {
+func withClient() (*smplkit.SmplClient, error) {
 	return clientfactory.New(globals)
 }
 

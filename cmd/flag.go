@@ -310,7 +310,7 @@ func flagDeleteCmd() *cobra.Command {
 }
 
 // newFlagFromType dispatches to the right typed factory.
-func newFlagFromType(ns *smplkit.FlagsManagement, id, flagType string, raw interface{}) (*smplkit.Flag, error) {
+func newFlagFromType(ns *smplkit.FlagsClient, id, flagType string, raw interface{}) (*smplkit.Flag, error) {
 	switch strings.ToUpper(flagType) {
 	case "BOOLEAN", "BOOL":
 		v, ok := raw.(bool)

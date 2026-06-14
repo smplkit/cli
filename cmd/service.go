@@ -38,7 +38,7 @@ func serviceListCmd() *cobra.Command {
 				return err
 			}
 			ctx := cliContext(cmd)
-			ns := client.Services()
+			ns := client.Platform().Services()
 			var svcs []*smplkit.Service
 			if all {
 				svcs, err = paginate.All(ctx, ns.List, limit)
@@ -78,7 +78,7 @@ func serviceGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			s, err := client.Services().Get(cliContext(cmd), args[0])
+			s, err := client.Platform().Services().Get(cliContext(cmd), args[0])
 			if err != nil {
 				return err
 			}
@@ -103,7 +103,7 @@ func serviceCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			s := client.Services().New(id, displayName)
+			s := client.Platform().Services().New(id, displayName)
 			if err := s.Save(cliContext(cmd)); err != nil {
 				return err
 			}
@@ -127,7 +127,7 @@ func serviceSetCmd() *cobra.Command {
 				return err
 			}
 			ctx := cliContext(cmd)
-			s, err := client.Services().Get(ctx, id)
+			s, err := client.Platform().Services().Get(ctx, id)
 			if err != nil {
 				return err
 			}
@@ -159,7 +159,7 @@ func serviceDeleteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := client.Services().Delete(cliContext(cmd), id); err != nil {
+			if err := client.Platform().Services().Delete(cliContext(cmd), id); err != nil {
 				return err
 			}
 			if globals.Quiet {

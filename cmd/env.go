@@ -46,7 +46,7 @@ func envListCmd() *cobra.Command {
 				return err
 			}
 			ctx := cliContext(cmd)
-			ns := client.Environments()
+			ns := client.Platform().Environments()
 			var envs []*smplkit.Environment
 			if all {
 				envs, err = paginate.All(ctx, ns.List, limit)
@@ -101,7 +101,7 @@ func envGetCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			e, err := client.Environments().Get(cliContext(cmd), args[0])
+			e, err := client.Platform().Environments().Get(cliContext(cmd), args[0])
 			if err != nil {
 				return err
 			}
@@ -132,7 +132,7 @@ func envCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ns := client.Environments()
+			ns := client.Platform().Environments()
 			opts := []smplkit.EnvironmentOption{}
 			if color != "" {
 				opts = append(opts, smplkit.WithEnvironmentColor(color))
@@ -166,7 +166,7 @@ func envSetCmd() *cobra.Command {
 				return err
 			}
 			ctx := cliContext(cmd)
-			e, err := client.Environments().Get(ctx, id)
+			e, err := client.Platform().Environments().Get(ctx, id)
 			if err != nil {
 				return err
 			}
@@ -212,7 +212,7 @@ func envDeleteCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if err := client.Environments().Delete(cliContext(cmd), id); err != nil {
+			if err := client.Platform().Environments().Delete(cliContext(cmd), id); err != nil {
 				return err
 			}
 			if globals.Quiet {
