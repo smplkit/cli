@@ -204,6 +204,161 @@ func TestRenderer_Forwarder_JSON_Environments(t *testing.T) {
 	}
 }
 
+func TestRenderer_Job_JSON(t *testing.T) {
+	body := "ping"
+	desc := "housekeeping"
+	next := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC)
+	j := &smplkit.Job{
+		ID:                "housekeeping",
+		Name:              "Housekeeping",
+		Description:       &desc,
+		Enabled:           true,
+		Type:              "http",
+		Schedule:          "0 3 * * *",
+		ConcurrencyPolicy: "ALLOW",
+		NextRunAt:         &next,
+		Configuration: smplkit.HttpConfig{
+			URL:    "https://admin.example.com/execute",
+			Method: smplkit.JobHttpMethodPost,
+			Body:   &body,
+			Headers: []smplkit.HttpHeader{
+				{Name: "Authorization", Value: "Bearer abc"},
+			},
+		},
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputJSON, false)
+	if err := r.RenderJob(j); err != nil {
+		t.Fatalf("RenderJob: %v", err)
+	}
+	var got JobAttr
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.ID != "housekeeping" || got.Schedule != "0 3 * * *" {
+		t.Errorf("got %+v", got)
+	}
+	if got.Configuration.Method != "POST" || got.Configuration.URL != "https://admin.example.com/execute" {
+		t.Errorf("config: %+v", got.Configuration)
+	}
+	// Header values round-trip plaintext (what makes `apply -f` work).
+	if len(got.Configuration.Headers) != 1 || got.Configuration.Headers[0].Value != "Bearer abc" {
+		t.Errorf("headers: %+v", got.Configuration.Headers)
+	}
+	if got.Configuration.Body == nil || *got.Configuration.Body != "ping" {
+		t.Errorf("body: %v", got.Configuration.Body)
+	}
+}
+
+func TestRenderer_Job_Quiet(t *testing.T) {
+	j := &smplkit.Job{ID: "j1"}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputTable, true)
+	if err := r.RenderJob(j); err != nil {
+		t.Fatalf("RenderJob: %v", err)
+	}
+	if got := strings.TrimSpace(buf.String()); got != "j1" {
+		t.Errorf("quiet: got %q", got)
+	}
+}
+
+func TestRenderer_Jobs_Table(t *testing.T) {
+	jobs := []*smplkit.Job{
+		{
+			ID:       "a",
+			Name:     "A",
+			Schedule: "0 0 * * *",
+			Enabled:  true,
+			Configuration: smplkit.HttpConfig{
+				URL:    "https://a.test",
+				Method: smplkit.JobHttpMethodGet,
+			},
+		},
+		{
+			ID:       "b",
+			Name:     "B",
+			Schedule: "now",
+			// Method unset → table shows the POST default.
+			Configuration: smplkit.HttpConfig{URL: "https://b.test"},
+		},
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputTable, false)
+	if err := r.RenderJobs(jobs); err != nil {
+		t.Fatalf("RenderJobs: %v", err)
+	}
+	out := buf.String()
+	if !strings.HasPrefix(out, "ID") {
+		t.Errorf("expected header, got %q", out)
+	}
+	if !strings.Contains(out, "SCHEDULE") || !strings.Contains(out, "NEXT RUN") {
+		t.Errorf("missing headers: %q", out)
+	}
+	if !strings.Contains(out, "https://a.test") || !strings.Contains(out, "GET") {
+		t.Errorf("missing row a: %q", out)
+	}
+	if !strings.Contains(out, "POST") {
+		t.Errorf("method should default to POST in the table: %q", out)
+	}
+}
+
+func TestRenderer_Jobs_JSONList(t *testing.T) {
+	jobs := []*smplkit.Job{
+		{ID: "a", Name: "A", Schedule: "0 0 * * *", Enabled: true,
+			Configuration: smplkit.HttpConfig{URL: "https://a.test", Method: smplkit.JobHttpMethodPost}},
+		{ID: "b", Name: "B", Schedule: "now",
+			Configuration: smplkit.HttpConfig{URL: "https://b.test", Method: smplkit.JobHttpMethodGet}},
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputJSON, false)
+	if err := r.RenderJobs(jobs); err != nil {
+		t.Fatalf("RenderJobs: %v", err)
+	}
+	var got []JobAttr
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	if len(got) != 2 || got[0].ID != "a" || got[1].Configuration.Method != "GET" {
+		t.Errorf("list projection: %+v", got)
+	}
+}
+
+func TestRenderer_Run_JSON(t *testing.T) {
+	started := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	run := &smplkit.Run{
+		ID:        "run-1",
+		Job:       "housekeeping",
+		Trigger:   "MANUAL",
+		Status:    "SUCCEEDED",
+		StartedAt: &started,
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputJSON, false)
+	if err := r.RenderRun(run); err != nil {
+		t.Fatalf("RenderRun: %v", err)
+	}
+	var got RunAttr
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.ID != "run-1" || got.Job != "housekeeping" || got.Status != "SUCCEEDED" {
+		t.Errorf("got %+v", got)
+	}
+}
+
+func TestRenderer_Run_Table(t *testing.T) {
+	run := &smplkit.Run{ID: "run-1", Job: "j", Trigger: "SCHEDULE", Status: "PENDING"}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputTable, false)
+	if err := r.RenderRun(run); err != nil {
+		t.Fatalf("RenderRun: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "TRIGGER") || !strings.Contains(out, "run-1") || !strings.Contains(out, "PENDING") {
+		t.Errorf("run table: %q", out)
+	}
+}
+
 func TestScalarString(t *testing.T) {
 	cases := []struct {
 		in   interface{}

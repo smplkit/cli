@@ -391,6 +391,106 @@ func forwarderEnvEnabled(f map[string]interface{}, env string) bool {
 	return enabled
 }
 
+// ─── Job CRUD + apply (upsert) ───────────────────────────────────────
+
+func TestAccJob_CRUDAndApply(t *testing.T) {
+	accGate(t)
+	id := uniqueID(t, "job")
+	t.Cleanup(func() { _ = deleteSilent(t, "job", id) })
+
+	// create — a daily cron POST with an Authorization header. Header
+	// values round-trip plaintext, which is what makes the apply path
+	// below able to reconcile without re-supplying every field.
+	mustRun(t, "job", "create", id,
+		"--name", "Acc Job",
+		"--schedule", "0 3 * * *",
+		"--url", "https://example.com/execute",
+		"--method", "POST",
+		"--header", "Authorization: Bearer acc-secret")
+
+	out := mustRun(t, "job", "get", id, "-o", "json")
+	var j map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &j); err != nil {
+		t.Fatalf("parse: %v\n%s", err, out)
+	}
+	if j["schedule"] != "0 3 * * *" {
+		t.Errorf("schedule not persisted: %v", j)
+	}
+	if jobHeaderValue(j, "Authorization") != "Bearer acc-secret" {
+		t.Errorf("header value not persisted plaintext: %v", j["configuration"])
+	}
+
+	// apply (existing) — change only the schedule. The header value and
+	// every other field must be preserved through the read-modify-write.
+	mustRun(t, "job", "apply", id, "--schedule", "*/30 * * * *")
+	out = mustRun(t, "job", "get", id, "-o", "json")
+	_ = json.Unmarshal([]byte(out), &j)
+	if j["schedule"] != "*/30 * * * *" {
+		t.Errorf("apply did not update schedule: %v", j)
+	}
+	if jobHeaderValue(j, "Authorization") != "Bearer acc-secret" {
+		t.Errorf("apply clobbered the preserved header: %v", j["configuration"])
+	}
+
+	// apply (drift reconcile) — rotate the header value; nothing else.
+	mustRun(t, "job", "apply", id, "--header", "Authorization: Bearer rotated")
+	out = mustRun(t, "job", "get", id, "-o", "json")
+	_ = json.Unmarshal([]byte(out), &j)
+	if jobHeaderValue(j, "Authorization") != "Bearer rotated" {
+		t.Errorf("apply did not reconcile rotated header: %v", j["configuration"])
+	}
+	if j["schedule"] != "*/30 * * * *" {
+		t.Errorf("apply clobbered the schedule while rotating header: %v", j)
+	}
+
+	// apply (create path) — a brand-new id upserts into existence.
+	id2 := uniqueID(t, "job2")
+	t.Cleanup(func() { _ = deleteSilent(t, "job", id2) })
+	mustRun(t, "job", "apply", id2,
+		"--schedule", "now",
+		"--url", "https://example.com/once")
+	out = mustRun(t, "job", "get", id2, "-o", "json")
+	var j2 map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &j2); err != nil {
+		t.Fatalf("parse j2: %v\n%s", err, out)
+	}
+	if j2["id"] != id2 {
+		t.Errorf("apply-create did not create %q: %v", id2, j2)
+	}
+
+	listOut := mustRun(t, "job", "list", "--quiet", "--all")
+	if !strings.Contains(listOut, id) {
+		t.Errorf("listed jobs missing %q:\n%s", id, listOut)
+	}
+
+	mustRun(t, "job", "delete", id, "--yes")
+	mustRun(t, "job", "delete", id2, "--yes")
+}
+
+// jobHeaderValue returns the value of the named header from a job's JSON
+// configuration, or "" when absent.
+func jobHeaderValue(j map[string]interface{}, name string) string {
+	cfg, ok := j["configuration"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	headers, ok := cfg["headers"].([]interface{})
+	if !ok {
+		return ""
+	}
+	for _, h := range headers {
+		hm, ok := h.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if hm["name"] == name {
+			v, _ := hm["value"].(string)
+			return v
+		}
+	}
+	return ""
+}
+
 // ─── Logger ──────────────────────────────────────────────────────────
 //
 // Loggers are created by the runtime SDK on first observation. The

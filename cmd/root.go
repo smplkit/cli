@@ -69,6 +69,7 @@ func newRootCmd(version string) *cobra.Command {
 	registerEnvCmd(root)
 	registerServiceCmd(root)
 	registerAuditCmd(root)
+	registerJobCmd(root)
 
 	return root
 }

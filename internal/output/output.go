@@ -688,6 +688,198 @@ func enabledEnvKeys(m map[string]smplkit.ForwarderEnvironment) []string {
 	return out
 }
 
+// ── Job ──────────────────────────────────────────────────────────────
+
+// JobAttr is the JSON/YAML shape the CLI exposes for a scheduled job —
+// the SDK model's user-facing fields, no JSON:API envelope, no client
+// back-reference. Header values round-trip plaintext, so a
+// `get -o json` snapshot replayed through `apply -f` preserves
+// credentials.
+type JobAttr struct {
+	ID                string            `json:"id" yaml:"id"`
+	Name              string            `json:"name" yaml:"name"`
+	Description       *string           `json:"description,omitempty" yaml:"description,omitempty"`
+	Enabled           bool              `json:"enabled" yaml:"enabled"`
+	Type              string            `json:"type,omitempty" yaml:"type,omitempty"`
+	Schedule          string            `json:"schedule" yaml:"schedule"`
+	ConcurrencyPolicy string            `json:"concurrency_policy,omitempty" yaml:"concurrency_policy,omitempty"`
+	Configuration     JobHTTPConfigAttr `json:"configuration" yaml:"configuration"`
+	NextRunAt         *time.Time        `json:"next_run_at,omitempty" yaml:"next_run_at,omitempty"`
+	CreatedAt         *time.Time        `json:"created_at,omitempty" yaml:"created_at,omitempty"`
+	UpdatedAt         *time.Time        `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
+	Version           *int              `json:"version,omitempty" yaml:"version,omitempty"`
+}
+
+// JobHTTPConfigAttr is the JSON/YAML shape for the HTTP request a job
+// fires when it runs.
+type JobHTTPConfigAttr struct {
+	URL           string          `json:"url" yaml:"url"`
+	Method        string          `json:"method,omitempty" yaml:"method,omitempty"`
+	Headers       []JobHeaderAttr `json:"headers,omitempty" yaml:"headers,omitempty"`
+	Body          *string         `json:"body,omitempty" yaml:"body,omitempty"`
+	SuccessStatus string          `json:"success_status,omitempty" yaml:"success_status,omitempty"`
+	Timeout       int             `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	TLSVerify     *bool           `json:"tls_verify,omitempty" yaml:"tls_verify,omitempty"`
+	CACert        *string         `json:"ca_cert,omitempty" yaml:"ca_cert,omitempty"`
+}
+
+// JobHeaderAttr is the JSON/YAML shape for an HTTP header pair.
+type JobHeaderAttr struct {
+	Name  string `json:"name" yaml:"name"`
+	Value string `json:"value" yaml:"value"`
+}
+
+// jobHTTPConfigToAttr projects an SDK HttpConfig onto its attribute shape.
+func jobHTTPConfigToAttr(c smplkit.HttpConfig) JobHTTPConfigAttr {
+	cfg := JobHTTPConfigAttr{
+		URL:           c.URL,
+		Method:        string(c.Method),
+		Body:          c.Body,
+		SuccessStatus: c.SuccessStatus,
+		Timeout:       c.Timeout,
+		TLSVerify:     c.TlsVerify,
+		CACert:        c.CaCert,
+	}
+	for _, h := range c.Headers {
+		cfg.Headers = append(cfg.Headers, JobHeaderAttr{Name: h.Name, Value: h.Value})
+	}
+	return cfg
+}
+
+// JobToAttr projects a smplkit.Job onto its attribute shape.
+func JobToAttr(j *smplkit.Job) JobAttr {
+	return JobAttr{
+		ID:                j.ID,
+		Name:              j.Name,
+		Description:       j.Description,
+		Enabled:           j.Enabled,
+		Type:              j.Type,
+		Schedule:          j.Schedule,
+		ConcurrencyPolicy: j.ConcurrencyPolicy,
+		Configuration:     jobHTTPConfigToAttr(j.Configuration),
+		NextRunAt:         j.NextRunAt,
+		CreatedAt:         j.CreatedAt,
+		UpdatedAt:         j.UpdatedAt,
+		Version:           j.Version,
+	}
+}
+
+// RenderJob writes a single job.
+func (r Renderer) RenderJob(j *smplkit.Job) error {
+	if r.Quiet {
+		return r.renderIdentifiers([]string{j.ID})
+	}
+	if done, err := r.renderJSONOrYAML(JobToAttr(j)); done {
+		return err
+	}
+	return r.renderJobTable([]*smplkit.Job{j})
+}
+
+// RenderJobs writes a list of jobs.
+func (r Renderer) RenderJobs(js []*smplkit.Job) error {
+	if r.Quiet {
+		ids := make([]string, 0, len(js))
+		for _, j := range js {
+			ids = append(ids, j.ID)
+		}
+		return r.renderIdentifiers(ids)
+	}
+	if r.Format != cliconfig.OutputTable {
+		attrs := make([]JobAttr, 0, len(js))
+		for _, j := range js {
+			attrs = append(attrs, JobToAttr(j))
+		}
+		if done, err := r.renderJSONOrYAML(attrs); done {
+			return err
+		}
+	}
+	return r.renderJobTable(js)
+}
+
+func (r Renderer) renderJobTable(js []*smplkit.Job) error {
+	tw := newTabWriter(r.Out)
+	fmt.Fprintln(tw, "ID\tNAME\tSCHEDULE\tENABLED\tMETHOD\tURL\tNEXT RUN")
+	for _, j := range js {
+		method := string(j.Configuration.Method)
+		if method == "" {
+			method = "POST"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%s\t%s\t%s\n",
+			j.ID, j.Name, j.Schedule, j.Enabled, method,
+			j.Configuration.URL, formatTime(j.NextRunAt))
+	}
+	return tw.Flush()
+}
+
+// ── Run ──────────────────────────────────────────────────────────────
+
+// RunAttr is the JSON/YAML shape for a single job run (read-only). It is a
+// complete projection of the SDK Run model; timing and forensics fields
+// are omitempty since a freshly-triggered run has not populated them yet.
+type RunAttr struct {
+	ID                string                 `json:"id" yaml:"id"`
+	Job               string                 `json:"job" yaml:"job"`
+	JobVersion        *int                   `json:"job_version,omitempty" yaml:"job_version,omitempty"`
+	Trigger           string                 `json:"trigger" yaml:"trigger"`
+	RerunOf           *string                `json:"rerun_of,omitempty" yaml:"rerun_of,omitempty"`
+	Status            string                 `json:"status" yaml:"status"`
+	ScheduledFor      *time.Time             `json:"scheduled_for,omitempty" yaml:"scheduled_for,omitempty"`
+	StartedAt         *time.Time             `json:"started_at,omitempty" yaml:"started_at,omitempty"`
+	FinishedAt        *time.Time             `json:"finished_at,omitempty" yaml:"finished_at,omitempty"`
+	PendingDurationMs *int                   `json:"pending_duration_ms,omitempty" yaml:"pending_duration_ms,omitempty"`
+	RunDurationMs     *int                   `json:"run_duration_ms,omitempty" yaml:"run_duration_ms,omitempty"`
+	TotalDurationMs   *int                   `json:"total_duration_ms,omitempty" yaml:"total_duration_ms,omitempty"`
+	FailureReason     *string                `json:"failure_reason,omitempty" yaml:"failure_reason,omitempty"`
+	Error             *string                `json:"error,omitempty" yaml:"error,omitempty"`
+	Request           map[string]interface{} `json:"request,omitempty" yaml:"request,omitempty"`
+	Result            map[string]interface{} `json:"result,omitempty" yaml:"result,omitempty"`
+	CreatedAt         *time.Time             `json:"created_at,omitempty" yaml:"created_at,omitempty"`
+}
+
+// RunToAttr projects a smplkit.Run onto its attribute shape.
+func RunToAttr(run *smplkit.Run) RunAttr {
+	return RunAttr{
+		ID:                run.ID,
+		Job:               run.Job,
+		JobVersion:        run.JobVersion,
+		Trigger:           run.Trigger,
+		RerunOf:           run.RerunOf,
+		Status:            run.Status,
+		ScheduledFor:      run.ScheduledFor,
+		StartedAt:         run.StartedAt,
+		FinishedAt:        run.FinishedAt,
+		PendingDurationMs: run.PendingDurationMs,
+		RunDurationMs:     run.RunDurationMs,
+		TotalDurationMs:   run.TotalDurationMs,
+		FailureReason:     run.FailureReason,
+		Error:             run.Error,
+		Request:           run.Request,
+		Result:            run.Result,
+		CreatedAt:         run.CreatedAt,
+	}
+}
+
+// RenderRun writes a single run.
+func (r Renderer) RenderRun(run *smplkit.Run) error {
+	if r.Quiet {
+		return r.renderIdentifiers([]string{run.ID})
+	}
+	if done, err := r.renderJSONOrYAML(RunToAttr(run)); done {
+		return err
+	}
+	return r.renderRunTable([]*smplkit.Run{run})
+}
+
+func (r Renderer) renderRunTable(runs []*smplkit.Run) error {
+	tw := newTabWriter(r.Out)
+	fmt.Fprintln(tw, "ID\tJOB\tTRIGGER\tSTATUS\tCREATED")
+	for _, run := range runs {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			run.ID, run.Job, run.Trigger, run.Status, formatTime(run.CreatedAt))
+	}
+	return tw.Flush()
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────
 
 func newTabWriter(out io.Writer) *tabwriter.Writer {
@@ -718,6 +910,15 @@ func envKeysStrMap(m map[string]map[string]interface{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// formatTime renders an optional timestamp for a table cell, empty when
+// nil. Uses RFC3339 so the value is unambiguous and machine-parseable.
+func formatTime(t *time.Time) string {
+	if t == nil {
+		return ""
+	}
+	return t.Format(time.RFC3339)
 }
 
 // scalarString renders a primitive value for a table cell. Falls back
