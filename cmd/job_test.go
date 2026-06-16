@@ -3,12 +3,36 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	smplkit "github.com/smplkit/go-sdk/v3"
 
 	"github.com/smplkit/cli/internal/output"
 )
+
+// TestJobListCmd_MutuallyExclusiveFilters verifies the list filter pairs
+// reject conflicting flags before any client call, so the error is a clean
+// validation failure rather than a wasted round-trip.
+func TestJobListCmd_MutuallyExclusiveFilters(t *testing.T) {
+	cases := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--enabled", "--disabled"}, "--enabled and --disabled are mutually exclusive"},
+		{[]string{"--recurring", "--one-off"}, "--recurring and --one-off are mutually exclusive"},
+	}
+	for _, c := range cases {
+		cmd := jobListCmd()
+		cmd.SetArgs(c.args)
+		cmd.SilenceUsage = true
+		cmd.SilenceErrors = true
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("args %v: got err %v, want containing %q", c.args, err, c.want)
+		}
+	}
+}
 
 func TestParseJobHeaders(t *testing.T) {
 	hdrs, err := parseJobHeaders([]string{

@@ -359,6 +359,122 @@ func TestRenderer_Run_Table(t *testing.T) {
 	}
 }
 
+func TestRenderer_Runs_JSONList(t *testing.T) {
+	runs := []*smplkit.Run{
+		{ID: "run-1", Job: "j", Trigger: "SCHEDULE", Status: "SUCCEEDED"},
+		{ID: "run-2", Job: "j", Trigger: "RERUN", Status: "PENDING"},
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputJSON, false)
+	if err := r.RenderRuns(runs); err != nil {
+		t.Fatalf("RenderRuns: %v", err)
+	}
+	var got []RunAttr
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	if len(got) != 2 || got[0].ID != "run-1" || got[1].Trigger != "RERUN" {
+		t.Errorf("list projection: %+v", got)
+	}
+}
+
+func TestRenderer_Runs_Table(t *testing.T) {
+	runs := []*smplkit.Run{
+		{ID: "run-1", Job: "j", Trigger: "SCHEDULE", Status: "SUCCEEDED"},
+		{ID: "run-2", Job: "j", Trigger: "MANUAL", Status: "FAILED"},
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputTable, false)
+	if err := r.RenderRuns(runs); err != nil {
+		t.Fatalf("RenderRuns: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "TRIGGER") || !strings.Contains(out, "run-1") ||
+		!strings.Contains(out, "run-2") || !strings.Contains(out, "FAILED") {
+		t.Errorf("runs table: %q", out)
+	}
+}
+
+func TestRenderer_Runs_Quiet(t *testing.T) {
+	runs := []*smplkit.Run{{ID: "run-1"}, {ID: "run-2"}}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputTable, true)
+	if err := r.RenderRuns(runs); err != nil {
+		t.Fatalf("RenderRuns: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "run-1") || !strings.Contains(out, "run-2") || strings.Contains(out, "TRIGGER") {
+		t.Errorf("quiet runs: %q", out)
+	}
+}
+
+func TestRenderer_Usage_JSON(t *testing.T) {
+	usage := &smplkit.Usage{
+		Period:          "2026-06",
+		RunsUsed:        42,
+		RunsIncluded:    1000,
+		ActiveJobs:      3,
+		ActiveJobsLimit: -1,
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputJSON, false)
+	if err := r.RenderUsage(usage); err != nil {
+		t.Fatalf("RenderUsage: %v", err)
+	}
+	var got UsageAttr
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	if got.Period != "2026-06" || got.RunsUsed != 42 || got.RunsIncluded != 1000 || got.ActiveJobsLimit != -1 {
+		t.Errorf("usage projection: %+v", got)
+	}
+}
+
+func TestRenderer_Usage_Table_UnlimitedReadsAsWord(t *testing.T) {
+	usage := &smplkit.Usage{Period: "2026-06", RunsUsed: 5, RunsIncluded: -1, ActiveJobs: 2, ActiveJobsLimit: 10}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputTable, false)
+	if err := r.RenderUsage(usage); err != nil {
+		t.Fatalf("RenderUsage: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "PERIOD") || !strings.Contains(out, "unlimited") || !strings.Contains(out, "2026-06") {
+		t.Errorf("usage table: %q", out)
+	}
+	// The capped allotment renders as its number, not the word.
+	if !strings.Contains(out, "10") {
+		t.Errorf("expected capped limit 10 in table: %q", out)
+	}
+}
+
+func TestRenderer_Usage_Quiet(t *testing.T) {
+	usage := &smplkit.Usage{Period: "2026-06"}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputTable, true)
+	if err := r.RenderUsage(usage); err != nil {
+		t.Fatalf("RenderUsage: %v", err)
+	}
+	if strings.TrimSpace(buf.String()) != "2026-06" {
+		t.Errorf("quiet usage: %q", buf.String())
+	}
+}
+
+func TestFormatLimit(t *testing.T) {
+	cases := []struct {
+		in   int
+		want string
+	}{
+		{-1, "unlimited"},
+		{0, "0"},
+		{1000, "1000"},
+	}
+	for _, c := range cases {
+		if got := formatLimit(c.in); got != c.want {
+			t.Errorf("formatLimit(%d) = %q want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestScalarString(t *testing.T) {
 	cases := []struct {
 		in   interface{}

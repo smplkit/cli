@@ -42,30 +42,68 @@ func registerJobCmd(root *cobra.Command) {
 	job.AddCommand(jobApplyCmd())
 	job.AddCommand(jobDeleteCmd())
 	job.AddCommand(jobRunCmd())
+	job.AddCommand(jobUsageCmd())
+
+	runs := &cobra.Command{
+		Use:   "runs",
+		Short: "Inspect and act on job runs",
+	}
+	runs.AddCommand(jobRunsListCmd())
+	runs.AddCommand(jobRunsGetCmd())
+	runs.AddCommand(jobRunsCancelCmd())
+	runs.AddCommand(jobRunsRerunCmd())
+	job.AddCommand(runs)
 
 	root.AddCommand(job)
 }
 
 func jobListCmd() *cobra.Command {
 	var (
-		limit int
-		all   bool
+		limit     int
+		all       bool
+		enabled   bool
+		disabled  bool
+		recurring bool
+		oneOff    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List jobs",
+		Long: "List jobs. Filter by state with --enabled/--disabled and by schedule\n" +
+			"cadence with --recurring (cron) / --one-off (datetime or \"now\"). Each\n" +
+			"pair is mutually exclusive; omit both to return every job.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if enabled && disabled {
+				return fmt.Errorf("--enabled and --disabled are mutually exclusive")
+			}
+			if recurring && oneOff {
+				return fmt.Errorf("--recurring and --one-off are mutually exclusive")
+			}
 			client, err := withClient()
 			if err != nil {
 				return err
 			}
 			ctx := cliContext(cmd)
 			ns := client.Jobs()
+			input := smplkit.ListJobsInput{}
+			if enabled {
+				t := true
+				input.Enabled = &t
+			} else if disabled {
+				f := false
+				input.Enabled = &f
+			}
+			if recurring {
+				t := true
+				input.Recurring = &t
+			} else if oneOff {
+				f := false
+				input.Recurring = &f
+			}
 			var jobs []*smplkit.Job
 			if all {
-				jobs, err = fetchAllJobs(ctx, ns, limit)
+				jobs, err = fetchAllJobs(ctx, ns, input, limit)
 			} else {
-				input := smplkit.ListJobsInput{}
 				if limit > 0 {
 					input.PageSize = limit
 				}
@@ -79,21 +117,28 @@ func jobListCmd() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&limit, "limit", 0, "page size (server default when unset)")
 	cmd.Flags().BoolVar(&all, "all", false, "fetch every page")
+	cmd.Flags().BoolVar(&enabled, "enabled", false, "only enabled jobs")
+	cmd.Flags().BoolVar(&disabled, "disabled", false, "only disabled (paused) jobs")
+	cmd.Flags().BoolVar(&recurring, "recurring", false, "only recurring (cron) jobs")
+	cmd.Flags().BoolVar(&oneOff, "one-off", false, "only one-off (datetime / \"now\") jobs")
 	return cmd
 }
 
-// fetchAllJobs walks every page of the jobs collection. The jobs List
+// fetchAllJobs walks every page of the jobs collection, preserving the
+// caller's filters (input.Enabled / input.Recurring). The jobs List
 // surface takes a ListJobsInput (offset pagination) rather than the
 // variadic ListOption fetcher paginate.All expects, so it gets its own
 // small page-walker — mirrors fetchAllForwarders.
-func fetchAllJobs(ctx context.Context, ns *smplkit.JobsClient, limit int) ([]*smplkit.Job, error) {
+func fetchAllJobs(ctx context.Context, ns *smplkit.JobsClient, input smplkit.ListJobsInput, limit int) ([]*smplkit.Job, error) {
 	pageSize := 1000
 	if limit > 0 && limit < pageSize {
 		pageSize = limit
 	}
 	var out []*smplkit.Job
 	for page := 1; ; page++ {
-		jobs, err := ns.List(ctx, smplkit.ListJobsInput{PageNumber: page, PageSize: pageSize})
+		input.PageNumber = page
+		input.PageSize = pageSize
+		jobs, err := ns.List(ctx, input)
 		if err != nil {
 			return nil, err
 		}
@@ -262,6 +307,121 @@ func jobRunCmd() *cobra.Command {
 				return err
 			}
 			run, err := client.Jobs().Run(cliContext(cmd), args[0])
+			if err != nil {
+				return err
+			}
+			return renderer(cmd).RenderRun(run)
+		},
+	}
+}
+
+func jobUsageCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "usage",
+		Short: "Show current-period jobs usage for the account",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, err := withClient()
+			if err != nil {
+				return err
+			}
+			usage, err := client.Jobs().Usage(cliContext(cmd))
+			if err != nil {
+				return err
+			}
+			return renderer(cmd).RenderUsage(usage)
+		},
+	}
+}
+
+// jobRunsListCmd lists run history. The SDK's Runs().List is cursor
+// paginated but the wrapper does not surface the next cursor, so there is
+// no --all: pass --after with the last id from the previous page to walk
+// forward manually.
+func jobRunsListCmd() *cobra.Command {
+	var (
+		job   string
+		limit int
+		after string
+	)
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List job runs (newest first)",
+		Long: "List run history, newest first, across all jobs or scoped to one with\n" +
+			"--job. Cursor paginated: pass --limit for the page size and --after with\n" +
+			"the last run id from the previous page to fetch the next page.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			client, err := withClient()
+			if err != nil {
+				return err
+			}
+			input := smplkit.ListRunsInput{Job: job, After: after}
+			if limit > 0 {
+				input.PageSize = limit
+			}
+			runs, err := client.Jobs().Runs().List(cliContext(cmd), input)
+			if err != nil {
+				return err
+			}
+			return renderer(cmd).RenderRuns(runs)
+		},
+	}
+	cmd.Flags().StringVar(&job, "job", "", "scope to a single job's run history")
+	cmd.Flags().IntVar(&limit, "limit", 0, "page size (server default when unset)")
+	cmd.Flags().StringVar(&after, "after", "", "cursor: the last run id from the previous page")
+	return cmd
+}
+
+func jobRunsGetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "get <run-id>",
+		Short: "Get a job run by id",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := withClient()
+			if err != nil {
+				return err
+			}
+			run, err := client.Jobs().Runs().Get(cliContext(cmd), args[0])
+			if err != nil {
+				return err
+			}
+			return renderer(cmd).RenderRun(run)
+		},
+	}
+}
+
+func jobRunsCancelCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "cancel <run-id>",
+		Short: "Cancel a pending job run",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := withClient()
+			if err != nil {
+				return err
+			}
+			run, err := client.Jobs().Runs().Cancel(cliContext(cmd), args[0])
+			if err != nil {
+				return err
+			}
+			return renderer(cmd).RenderRun(run)
+		},
+	}
+}
+
+func jobRunsRerunCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "rerun <run-id>",
+		Short: "Re-run a prior run (spawns a new RERUN run)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			client, err := withClient()
+			if err != nil {
+				return err
+			}
+			run, err := client.Jobs().Runs().Rerun(cliContext(cmd), args[0])
 			if err != nil {
 				return err
 			}

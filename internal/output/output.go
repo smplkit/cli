@@ -870,6 +870,27 @@ func (r Renderer) RenderRun(run *smplkit.Run) error {
 	return r.renderRunTable([]*smplkit.Run{run})
 }
 
+// RenderRuns writes a list of runs.
+func (r Renderer) RenderRuns(runs []*smplkit.Run) error {
+	if r.Quiet {
+		ids := make([]string, 0, len(runs))
+		for _, run := range runs {
+			ids = append(ids, run.ID)
+		}
+		return r.renderIdentifiers(ids)
+	}
+	if r.Format != cliconfig.OutputTable {
+		attrs := make([]RunAttr, 0, len(runs))
+		for _, run := range runs {
+			attrs = append(attrs, RunToAttr(run))
+		}
+		if done, err := r.renderJSONOrYAML(attrs); done {
+			return err
+		}
+	}
+	return r.renderRunTable(runs)
+}
+
 func (r Renderer) renderRunTable(runs []*smplkit.Run) error {
 	tw := newTabWriter(r.Out)
 	fmt.Fprintln(tw, "ID\tJOB\tTRIGGER\tSTATUS\tCREATED")
@@ -878,6 +899,55 @@ func (r Renderer) renderRunTable(runs []*smplkit.Run) error {
 			run.ID, run.Job, run.Trigger, run.Status, formatTime(run.CreatedAt))
 	}
 	return tw.Flush()
+}
+
+// ── Usage ────────────────────────────────────────────────────────────
+
+// UsageAttr is the JSON/YAML shape for the account's current-period jobs
+// usage (read-only). A complete projection of the SDK Usage model; -1 in
+// the *_included / *_limit fields means the plan imposes no cap.
+type UsageAttr struct {
+	Period          string `json:"period" yaml:"period"`
+	RunsUsed        int    `json:"runs_used" yaml:"runs_used"`
+	RunsIncluded    int    `json:"runs_included" yaml:"runs_included"`
+	ActiveJobs      int    `json:"active_jobs" yaml:"active_jobs"`
+	ActiveJobsLimit int    `json:"active_jobs_limit" yaml:"active_jobs_limit"`
+}
+
+// UsageToAttr projects a smplkit.Usage onto its attribute shape.
+func UsageToAttr(u *smplkit.Usage) UsageAttr {
+	return UsageAttr{
+		Period:          u.Period,
+		RunsUsed:        u.RunsUsed,
+		RunsIncluded:    u.RunsIncluded,
+		ActiveJobs:      u.ActiveJobs,
+		ActiveJobsLimit: u.ActiveJobsLimit,
+	}
+}
+
+// RenderUsage writes the current-period jobs usage.
+func (r Renderer) RenderUsage(u *smplkit.Usage) error {
+	if r.Quiet {
+		return r.renderIdentifiers([]string{u.Period})
+	}
+	if done, err := r.renderJSONOrYAML(UsageToAttr(u)); done {
+		return err
+	}
+	tw := newTabWriter(r.Out)
+	fmt.Fprintln(tw, "PERIOD\tRUNS USED\tRUNS INCLUDED\tACTIVE JOBS\tACTIVE JOBS LIMIT")
+	fmt.Fprintf(tw, "%s\t%d\t%s\t%d\t%s\n",
+		u.Period, u.RunsUsed, formatLimit(u.RunsIncluded),
+		u.ActiveJobs, formatLimit(u.ActiveJobsLimit))
+	return tw.Flush()
+}
+
+// formatLimit renders a plan allotment for a table cell: -1 (no cap) reads
+// as "unlimited"; any other value is the number itself.
+func formatLimit(n int) string {
+	if n < 0 {
+		return "unlimited"
+	}
+	return fmt.Sprintf("%d", n)
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

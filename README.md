@@ -58,6 +58,8 @@ log-group      log groups             (Manage().LogGroups())
 env            environments           (Manage().Environments())
 service        services               (Manage().Services())
 audit forwarder SIEM forwarders       (Manage().Audit().Forwarders())
+job            scheduled jobs         (Jobs())
+job runs       job run history        (Jobs().Runs())
 ```
 
 Five universal verbs:
@@ -74,6 +76,23 @@ Five universal verbs:
 `set --enabled / --disabled / --value / --rules` (flags), `set
 --env-value` (configs), and `set --level` (loggers) are env-scoped and
 require `--env`.
+
+### Jobs
+
+Jobs is account-global (no `--env`) and carries verbs beyond the five:
+
+- `job create <id>` / `job apply <id>` — `--schedule` + `--url` (plus
+  `--method` / `--header` / `--body`) for the simple case, or `-f
+  job.json` to round-trip a full definition; scalar flags override file
+  values. `apply` is an idempotent upsert (create-or-reconcile) built
+  for scheduled CI.
+- `job run <id>` — trigger one immediate (MANUAL) run.
+- `job runs list|get|cancel|rerun` — inspect run history and act on a
+  run: `list` (filter `--job`, newest first), `get <run-id>`, `cancel
+  <run-id>` (a pending run), `rerun <run-id>` (spawns a RERUN).
+- `job usage` — current-period run/active-job counters for the account.
+- `job list` filters: `--enabled` / `--disabled` (state) and
+  `--recurring` / `--one-off` (cron vs. datetime/`now` cadence).
 
 ## Examples
 
@@ -97,6 +116,11 @@ smplkit config set billing --env staging --env-value retry_count=1 --item-type n
 smplkit audit forwarder get siem -o json > siem.json
 $EDITOR siem.json
 smplkit audit forwarder set siem -f siem.json
+
+# Keep a scheduled job in a desired state, then trigger and watch a run
+smplkit job apply nightly-warm --schedule "0 2 * * *" --url https://api.example.com/warm
+smplkit job run nightly-warm -o json | jq -r .id
+smplkit job runs list --job nightly-warm
 ```
 
 ## Pagination
@@ -104,6 +128,11 @@ smplkit audit forwarder set siem -f siem.json
 `list` accepts `--limit` (page size) and `--all` (auto-paginate to
 exhaustion). Both map onto the SDK's `WithPageNumber` / `WithPageSize`
 list options.
+
+`job runs list` is the exception: the runs collection is cursor
+paginated and the SDK wrapper returns a page without surfacing the next
+cursor, so there is no `--all`. Use `--limit` for the page size and
+`--after <last-run-id>` to step forward a page at a time.
 
 ## Errors
 

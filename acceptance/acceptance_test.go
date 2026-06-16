@@ -467,6 +467,148 @@ func TestAccJob_CRUDAndApply(t *testing.T) {
 	mustRun(t, "job", "delete", id2, "--yes")
 }
 
+// TestAccJobRuns exercises the run-trigger and the runs sub-resource
+// (list / get / rerun / cancel) end to end against the live jobs service.
+func TestAccJobRuns(t *testing.T) {
+	accGate(t)
+	id := uniqueID(t, "jobrun")
+	t.Cleanup(func() { _ = deleteSilent(t, "job", id) })
+
+	// An enabled recurring job. The cron is intentionally rare (Jan 1) so
+	// the scheduler won't fire it during the test; runs are driven manually.
+	mustRun(t, "job", "create", id,
+		"--name", "Acc Job Runs",
+		"--schedule", "0 0 1 1 *",
+		"--url", "https://example.com/run",
+		"--method", "POST")
+
+	// Trigger a manual run.
+	out := mustRun(t, "job", "run", id, "-o", "json")
+	run := mustParseObj(t, out)
+	runID, _ := run["id"].(string)
+	if runID == "" || run["trigger"] != "MANUAL" || run["job"] != id {
+		t.Fatalf("unexpected manual run: %v", run)
+	}
+
+	// It appears in the job's run history.
+	out = mustRun(t, "job", "runs", "list", "--job", id, "-o", "json")
+	var runs []map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &runs); err != nil {
+		t.Fatalf("parse runs list: %v\n%s", err, out)
+	}
+	if !containsRunID(runs, runID) {
+		t.Errorf("manual run %q missing from runs list:\n%s", runID, out)
+	}
+
+	// Fetch the single run by id.
+	got := mustParseObj(t, mustRun(t, "job", "runs", "get", runID, "-o", "json"))
+	if got["id"] != runID || got["job"] != id {
+		t.Errorf("runs get returned wrong run: %v", got)
+	}
+
+	// Re-run it: spawns a new RERUN whose rerun_of points back.
+	rerun := mustParseObj(t, mustRun(t, "job", "runs", "rerun", runID, "-o", "json"))
+	rerunID, _ := rerun["id"].(string)
+	if rerunID == "" || rerun["trigger"] != "RERUN" || rerun["rerun_of"] != runID {
+		t.Errorf("unexpected rerun: %v", rerun)
+	}
+
+	// Cancel the rerun while it is still pending.
+	canceled := mustParseObj(t, mustRun(t, "job", "runs", "cancel", rerunID, "-o", "json"))
+	if canceled["status"] != "CANCELED" {
+		t.Errorf("expected CANCELED, got status=%v", canceled["status"])
+	}
+}
+
+// TestAccJobUsageAndListFilters covers `job usage` and the `job list`
+// state/cadence filters against the live jobs service.
+func TestAccJobUsageAndListFilters(t *testing.T) {
+	accGate(t)
+	idRecurring := uniqueID(t, "jobcron")
+	idOneOff := uniqueID(t, "jobonce")
+	idDisabled := uniqueID(t, "joboff")
+	for _, id := range []string{idRecurring, idOneOff, idDisabled} {
+		id := id
+		t.Cleanup(func() { _ = deleteSilent(t, "job", id) })
+	}
+
+	// Enabled recurring (cron) job.
+	mustRun(t, "job", "create", idRecurring,
+		"--schedule", "0 0 1 1 *", "--url", "https://example.com/cron")
+	// Enabled one-off (future datetime) job — stays enabled until it fires.
+	mustRun(t, "job", "create", idOneOff,
+		"--schedule", "2099-01-01T00:00:00Z", "--url", "https://example.com/once")
+	// Disabled job — enabled=false is only settable via -f, so write a file.
+	disabledFile := filepath.Join(t.TempDir(), "disabled.json")
+	body := `{"schedule":"0 0 1 1 *","enabled":false,"configuration":{"url":"https://example.com/off","method":"POST"}}`
+	if err := os.WriteFile(disabledFile, []byte(body), 0o600); err != nil {
+		t.Fatalf("write disabled file: %v", err)
+	}
+	mustRun(t, "job", "create", idDisabled, "-f", disabledFile)
+
+	// --recurring returns the cron job, not the one-off.
+	rec := mustRun(t, "job", "list", "--recurring", "--quiet", "--all")
+	if !lineContains(rec, idRecurring) || lineContains(rec, idOneOff) {
+		t.Errorf("--recurring filter wrong: want %q present, %q absent:\n%s", idRecurring, idOneOff, rec)
+	}
+	// --one-off returns the one-off, not the cron job.
+	once := mustRun(t, "job", "list", "--one-off", "--quiet", "--all")
+	if !lineContains(once, idOneOff) || lineContains(once, idRecurring) {
+		t.Errorf("--one-off filter wrong: want %q present, %q absent:\n%s", idOneOff, idRecurring, once)
+	}
+	// --disabled returns the disabled job, not the enabled ones.
+	off := mustRun(t, "job", "list", "--disabled", "--quiet", "--all")
+	if !lineContains(off, idDisabled) || lineContains(off, idRecurring) {
+		t.Errorf("--disabled filter wrong: want %q present, %q absent:\n%s", idDisabled, idRecurring, off)
+	}
+	// --enabled returns the enabled jobs, not the disabled one.
+	on := mustRun(t, "job", "list", "--enabled", "--quiet", "--all")
+	if !lineContains(on, idRecurring) || lineContains(on, idDisabled) {
+		t.Errorf("--enabled filter wrong: want %q present, %q absent:\n%s", idRecurring, idDisabled, on)
+	}
+
+	// usage reports the current period and at least our two enabled jobs.
+	usage := mustParseObj(t, mustRun(t, "job", "usage", "-o", "json"))
+	if p, _ := usage["period"].(string); p == "" {
+		t.Errorf("usage missing period: %v", usage)
+	}
+	if active, _ := usage["active_jobs"].(float64); active < 2 {
+		t.Errorf("expected active_jobs >= 2 (two enabled jobs created), got %v", usage["active_jobs"])
+	}
+}
+
+// mustParseObj unmarshals a single JSON object, failing the test on error.
+func mustParseObj(t *testing.T, out string) map[string]interface{} {
+	t.Helper()
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(out), &obj); err != nil {
+		t.Fatalf("parse json: %v\n%s", err, out)
+	}
+	return obj
+}
+
+// containsRunID reports whether a runs listing includes the given run id.
+func containsRunID(runs []map[string]interface{}, id string) bool {
+	for _, r := range runs {
+		if r["id"] == id {
+			return true
+		}
+	}
+	return false
+}
+
+// lineContains reports whether any newline-delimited line of out equals id
+// — used to match `list --quiet` identifier output exactly (so an id that
+// is a prefix of another doesn't false-positive).
+func lineContains(out, id string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == id {
+			return true
+		}
+	}
+	return false
+}
+
 // jobHeaderValue returns the value of the named header from a job's JSON
 // configuration, or "" when absent.
 func jobHeaderValue(j map[string]interface{}, name string) string {
