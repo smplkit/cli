@@ -25,11 +25,10 @@ management surface (ADR-053 §1, §2.4).
   `WithPageNumber` / `WithPageSize` options.
 - `internal/values/` — typed value parsing (`--item-type`, `--default`,
   `@file` references).
-- `acceptance/` — CLI-binary acceptance tests gated by `ACC=1`,
-  exercised in CI against the local platform.
-- `ci/` — docker compose + Caddyfile + init SQL for the local platform.
-- `scripts/` — `wait_for_platform.sh` and `smoke_bootstrap.py`, copied
-  from terraform-provider-smplkit/ci so CI workflows stay in lockstep.
+- `acceptance/` — CLI-binary acceptance tests gated by `ACC=1`, run
+  locally via `make accept` against a running ADR-042 platform. In CI
+  they run from the `smplkit/e2e` repo against the production platform,
+  not in this repo.
 
 ## Build / test
 
@@ -62,16 +61,18 @@ make accept    # ACC=1 go test ./acceptance/... against the local platform
 
 - `ci.yml` — `make check` (build + vet + golangci-lint + unit tests)
   on every push and PR.
-- `acceptance.yml` — brings up the local platform via
-  `ci/docker-compose.yml` (mirroring terraform-provider-smplkit's
-  setup) and runs `ACC=1 go test ./acceptance/...` on every push to
-  `main`. The CI IAM role is locked to `refs/heads/main`, so PRs can't
-  run it.
 - `release.yml` — semantic-release (fix-only convention) decides the
   next version and pushes a tag; GoReleaser then builds signed
   cross-platform archives + checksums and publishes a GitHub release
   and a multi-arch GHCR image. Reuses the existing org-level GPG
   signing secret; introduces no new secrets.
+
+Acceptance does **not** run in this repo's CI. The ephemeral-platform
+`acceptance.yml` workflow (and its `ci/` docker-compose + Caddyfile)
+was retired in commit 3a59ca8 — CLI acceptance now runs from the
+`smplkit/e2e` repo against the production platform. `make accept`
+still works locally against a running ADR-042 platform (see Build /
+test).
 
 ## Pre-launch commit convention
 

@@ -167,9 +167,10 @@ make check     # build + vet + lint + tests (the CI gate)
 make accept    # acceptance tests against the local platform (ADR-042)
 ```
 
-The acceptance suite requires the smplkit platform running locally
-(see [`ci/docker-compose.yml`](ci/docker-compose.yml) for the same
-images CI brings up) and a valid `SMPLKIT_API_KEY` for it.
+The acceptance suite requires the full smplkit platform running
+locally (ADR-042) and a valid `SMPLKIT_API_KEY` for it. It is not run
+in this repo's CI; CLI acceptance runs from the `smplkit/e2e` repo
+against the production platform.
 
 ## See also
 
