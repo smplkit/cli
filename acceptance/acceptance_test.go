@@ -3,9 +3,10 @@
 // environment variable so a stray `go test ./...` doesn't try to hit
 // the platform.
 //
-// CI brings up the platform via docker compose under ci/ — same
-// pattern terraform-provider-smplkit uses. Locally, run from a shell
-// that already has the platform up (~/projects/.github/platform/start.sh).
+// These tests do not run in this repo's CI; CLI acceptance runs from
+// the smplkit/e2e repo against the production platform. Run them
+// locally via `make accept` from a shell that already has the platform
+// up (~/projects/.github/platform/start.sh).
 //
 // All tests share one ephemeral resource namespace per run; each test
 // generates a unique id so they can run in parallel without colliding.
