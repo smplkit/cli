@@ -68,43 +68,31 @@ signs:
       - "--detach-sign"
       - "${artifact}"
 
-dockers:
-  - image_templates:
-      - "ghcr.io/smplkit/cli:{{ .Version }}-amd64"
-    use: buildx
-    goos: linux
-    goarch: amd64
-    build_flag_templates:
-      - "--platform=linux/amd64"
-      - "--label=org.opencontainers.image.title=smplkit"
-      - "--label=org.opencontainers.image.description=smplkit command-line interface"
-      - "--label=org.opencontainers.image.source=https://github.com/smplkit/cli"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .Commit }}"
-      - "--label=org.opencontainers.image.licenses=MIT"
-  - image_templates:
-      - "ghcr.io/smplkit/cli:{{ .Version }}-arm64"
-    use: buildx
-    goos: linux
-    goarch: arm64
-    build_flag_templates:
-      - "--platform=linux/arm64"
-      - "--label=org.opencontainers.image.title=smplkit"
-      - "--label=org.opencontainers.image.description=smplkit command-line interface"
-      - "--label=org.opencontainers.image.source=https://github.com/smplkit/cli"
-      - "--label=org.opencontainers.image.version={{ .Version }}"
-      - "--label=org.opencontainers.image.revision={{ .Commit }}"
-      - "--label=org.opencontainers.image.licenses=MIT"
-
-docker_manifests:
-  - name_template: "ghcr.io/smplkit/cli:{{ .Version }}"
-    image_templates:
-      - "ghcr.io/smplkit/cli:{{ .Version }}-amd64"
-      - "ghcr.io/smplkit/cli:{{ .Version }}-arm64"
-  - name_template: "ghcr.io/smplkit/cli:latest"
-    image_templates:
-      - "ghcr.io/smplkit/cli:{{ .Version }}-amd64"
-      - "ghcr.io/smplkit/cli:{{ .Version }}-arm64"
+# dockers_v2 replaces the legacy dockers + docker_manifests pair: a
+# single `docker buildx build` produces the multi-arch manifest
+# directly, so the per-arch `-amd64`/`-arm64` intermediate tags are no
+# longer published — only the `{{ .Version }}` and `latest` manifests
+# remain (same as before). The build context now lays binaries out by
+# $TARGETPLATFORM, which is why the Dockerfile copies from that path.
+dockers_v2:
+  - ids:
+      - smplkit
+    images:
+      - "ghcr.io/smplkit/cli"
+    tags:
+      - "{{ .Version }}"
+      - "latest"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    dockerfile: Dockerfile
+    labels:
+      org.opencontainers.image.title: smplkit
+      org.opencontainers.image.description: smplkit command-line interface
+      org.opencontainers.image.source: https://github.com/smplkit/cli
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .Commit }}"
+      org.opencontainers.image.licenses: MIT
 
 changelog:
   disable: true
