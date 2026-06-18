@@ -19,15 +19,28 @@ import (
 //
 // `type` is intentionally absent: the jobs service supports only "http"
 // (the SDK hardcodes it) and the field is immutable, so a round-trip's
-// `type` key is ignored rather than silently no-op'd.
+// `type` key is ignored rather than silently no-op'd. The base `enabled`
+// is likewise absent: enablement is per-environment (the base `enabled`
+// is a read-only roll-up the server derives), so it lives in the
+// `environments` map. A `get -o json` snapshot still carries the rendered
+// roll-up `enabled`, which is ignored here on replay.
 type jobFileShape struct {
-	ID                string                    `json:"id,omitempty"`
-	Name              string                    `json:"name,omitempty"`
-	Description       *string                   `json:"description,omitempty"`
-	Enabled           *bool                     `json:"enabled,omitempty"`
-	Schedule          string                    `json:"schedule,omitempty"`
-	ConcurrencyPolicy string                    `json:"concurrency_policy,omitempty"`
-	Configuration     *output.JobHTTPConfigAttr `json:"configuration,omitempty"`
+	ID                string                     `json:"id,omitempty"`
+	Name              string                     `json:"name,omitempty"`
+	Description       *string                    `json:"description,omitempty"`
+	Schedule          string                     `json:"schedule,omitempty"`
+	ConcurrencyPolicy string                     `json:"concurrency_policy,omitempty"`
+	Environments      map[string]jobEnvFileShape `json:"environments,omitempty"`
+	Configuration     *output.JobHTTPConfigAttr  `json:"configuration,omitempty"`
+}
+
+// jobEnvFileShape is the per-environment override carried in the `-f`
+// file: whether the job is enabled in that environment and an optional
+// configuration that fully replaces the base configuration there (a nil
+// Configuration inherits the base).
+type jobEnvFileShape struct {
+	Enabled       bool                      `json:"enabled"`
+	Configuration *output.JobHTTPConfigAttr `json:"configuration,omitempty"`
 }
 
 func registerJobCmd(root *cobra.Command) {
@@ -177,8 +190,12 @@ func jobCreateCmd() *cobra.Command {
 			"--header/--body) for the simple case, or -f job.json (produced by\n" +
 			"`smplkit job get -o json`) to round-trip a full definition. Scalar flags\n" +
 			"override file values where both are supplied. Fields without a scalar flag\n" +
-			"(enabled, concurrency policy, success status, timeout, TLS) come from -f.\n" +
-			"--header sets the complete header set; supply every header you want.",
+			"(concurrency policy, success status, timeout, TLS) come from -f.\n" +
+			"--header sets the complete header set; supply every header you want.\n\n" +
+			"Enablement is per-environment: a recurring (cron) job fires only in\n" +
+			"environments turned on via --enable-env <env> (repeatable) or the file's\n" +
+			"`environments` map. A one-off (datetime / \"now\") job runs once in the\n" +
+			"single environment named by --env.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
@@ -217,10 +234,12 @@ func jobApplyCmd() *cobra.Command {
 			"apply -f file then the changed scalar flags (every field you don't pass is\n" +
 			"preserved from the server) and PUT it back; if it does not exist, create it.\n" +
 			"Safe to run repeatedly — re-running with the same flags is a no-op, and\n" +
-			"changing a flag reconciles drift. Note: --header sets the COMPLETE header\n" +
-			"set, so re-supply every header you want to keep (rotating one of several\n" +
-			"headers means passing them all). Built for scheduled CI keeping a job in a\n" +
-			"desired state.",
+			"changing a flag reconciles drift. Enablement reconciles per environment\n" +
+			"via --enable-env / --disable-env (each repeatable), leaving the enablement\n" +
+			"of environments you don't name untouched. Note: --header sets the COMPLETE\n" +
+			"header set, so re-supply every header you want to keep (rotating one of\n" +
+			"several headers means passing them all). Built for scheduled CI keeping a\n" +
+			"job in a desired state.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
@@ -297,7 +316,8 @@ func jobDeleteCmd() *cobra.Command {
 }
 
 func jobRunCmd() *cobra.Command {
-	return &cobra.Command{
+	var env string
+	cmd := &cobra.Command{
 		Use:   "run <id>",
 		Short: "Trigger an immediate run of a job",
 		Args:  cobra.ExactArgs(1),
@@ -306,13 +326,15 @@ func jobRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			run, err := client.Jobs().Run(cliContext(cmd), args[0])
+			run, err := client.Jobs().Run(cliContext(cmd), args[0], env)
 			if err != nil {
 				return err
 			}
 			return renderer(cmd).RenderRun(run)
 		},
 	}
+	cmd.Flags().StringVar(&env, "env", "", "environment the manual run executes in (defaults to the job's environment when unambiguous)")
+	return cmd
 }
 
 func jobUsageCmd() *cobra.Command {
@@ -341,6 +363,7 @@ func jobUsageCmd() *cobra.Command {
 func jobRunsListCmd() *cobra.Command {
 	var (
 		job   string
+		env   string
 		limit int
 		after string
 	)
@@ -348,8 +371,10 @@ func jobRunsListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List job runs (newest first)",
 		Long: "List run history, newest first, across all jobs or scoped to one with\n" +
-			"--job. Cursor paginated: pass --limit for the page size and --after with\n" +
-			"the last run id from the previous page to fetch the next page.",
+			"--job. Restrict to a single environment with --env (omit to cover every\n" +
+			"environment you can access). Cursor paginated: pass --limit for the page\n" +
+			"size and --after with the last run id from the previous page to fetch the\n" +
+			"next page.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			client, err := withClient()
@@ -357,6 +382,9 @@ func jobRunsListCmd() *cobra.Command {
 				return err
 			}
 			input := smplkit.ListRunsInput{Job: job, After: after}
+			if env != "" {
+				input.Environments = []string{env}
+			}
 			if limit > 0 {
 				input.PageSize = limit
 			}
@@ -368,6 +396,7 @@ func jobRunsListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&job, "job", "", "scope to a single job's run history")
+	cmd.Flags().StringVar(&env, "env", "", "scope to runs stamped with this environment")
 	cmd.Flags().IntVar(&limit, "limit", 0, "page size (server default when unset)")
 	cmd.Flags().StringVar(&after, "after", "", "cursor: the last run id from the previous page")
 	return cmd
@@ -442,12 +471,20 @@ type jobInputs struct {
 	headers  []string
 	file     string
 
+	// enableEnvs / disableEnvs turn the job on/off in named environments
+	// (the per-environment enablement that replaced the old base flag). env
+	// is the single environment a one-off (datetime / "now") job is born in.
+	enableEnvs  []string
+	disableEnvs []string
+	env         string
+
 	nameSet     bool
 	scheduleSet bool
 	urlSet      bool
 	methodSet   bool
 	bodySet     bool
 	headerSet   bool
+	envSet      bool
 }
 
 func addJobScalarFlags(cmd *cobra.Command, in *jobInputs) {
@@ -457,6 +494,9 @@ func addJobScalarFlags(cmd *cobra.Command, in *jobInputs) {
 	cmd.Flags().StringVar(&in.method, "method", "POST", "HTTP method: GET|POST|PUT|PATCH|DELETE")
 	cmd.Flags().StringArrayVar(&in.headers, "header", nil, "HTTP header (repeatable): --header \"Name: Value\" (replaces the full header set)")
 	cmd.Flags().StringVar(&in.body, "body", "", "request body sent on each run")
+	cmd.Flags().StringSliceVar(&in.enableEnvs, "enable-env", nil, "enable a recurring job in an environment (repeatable)")
+	cmd.Flags().StringSliceVar(&in.disableEnvs, "disable-env", nil, "disable a recurring job in an environment (repeatable)")
+	cmd.Flags().StringVar(&in.env, "env", "", "environment a one-off (datetime/\"now\") job is created in")
 	cmd.Flags().StringVarP(&in.file, "file", "f", "", "load definition from JSON file (round-trips `get -o json`)")
 }
 
@@ -469,6 +509,7 @@ func (in *jobInputs) readChanged(cmd *cobra.Command) {
 	in.methodSet = cmd.Flags().Changed("method")
 	in.bodySet = cmd.Flags().Changed("body")
 	in.headerSet = cmd.Flags().Changed("header")
+	in.envSet = cmd.Flags().Changed("env")
 }
 
 // buildJobForCreate assembles a fresh, unsaved *Job from the -f file and
@@ -500,10 +541,17 @@ func buildJobForCreate(ns *smplkit.JobsClient, id string, shape *jobFileShape, i
 	}
 
 	opts := []smplkit.JobOption{}
+	envs, eerr := buildJobEnvironments(shape, in)
+	if eerr != nil {
+		return nil, eerr
+	}
+	if len(envs) > 0 {
+		opts = append(opts, smplkit.WithJobEnvironments(envs))
+	}
+	if in.envSet {
+		opts = append(opts, smplkit.WithJobBirthEnvironment(in.env))
+	}
 	if shape != nil {
-		if shape.Enabled != nil {
-			opts = append(opts, smplkit.WithJobEnabled(*shape.Enabled))
-		}
 		if shape.Description != nil {
 			opts = append(opts, smplkit.WithJobDescription(*shape.Description))
 		}
@@ -513,6 +561,96 @@ func buildJobForCreate(ns *smplkit.JobsClient, id string, shape *jobFileShape, i
 	}
 
 	return ns.New(id, effName, effSchedule, cfg, opts...), nil
+}
+
+// jobEnvShapeToConfig converts the file/CLI HTTP-config attribute shape
+// into the SDK's HttpConfig used for per-environment overrides.
+func jobEnvShapeToConfig(c *output.JobHTTPConfigAttr) *smplkit.HttpConfig {
+	if c == nil {
+		return nil
+	}
+	cfg := smplkit.HttpConfig{
+		URL:           c.URL,
+		Method:        smplkit.JobHttpMethod(c.Method),
+		SuccessStatus: c.SuccessStatus,
+		Timeout:       c.Timeout,
+		Body:          c.Body,
+		TlsVerify:     c.TLSVerify,
+		CaCert:        c.CACert,
+	}
+	for _, h := range c.Headers {
+		cfg.Headers = append(cfg.Headers, smplkit.HttpHeader{Name: h.Name, Value: h.Value})
+	}
+	return &cfg
+}
+
+// jobEnvFileToModel converts the file shape's environments map into the
+// SDK's per-environment override map.
+func jobEnvFileToModel(envs map[string]jobEnvFileShape) map[string]smplkit.JobEnvironment {
+	if envs == nil {
+		return nil
+	}
+	out := make(map[string]smplkit.JobEnvironment, len(envs))
+	for k, e := range envs {
+		out[k] = smplkit.JobEnvironment{
+			Enabled:       e.Enabled,
+			Configuration: jobEnvShapeToConfig(e.Configuration),
+		}
+	}
+	return out
+}
+
+// buildJobEnvironments assembles the per-environment override map for a
+// create from the -f file's `environments` plus the --enable-env /
+// --disable-env scalar flags (flags win where they overlap the file).
+func buildJobEnvironments(shape *jobFileShape, in jobInputs) (map[string]smplkit.JobEnvironment, error) {
+	var envs map[string]smplkit.JobEnvironment
+	if shape != nil && shape.Environments != nil {
+		envs = jobEnvFileToModel(shape.Environments)
+	}
+	if len(in.enableEnvs) == 0 && len(in.disableEnvs) == 0 {
+		return envs, nil
+	}
+	if envs == nil {
+		envs = make(map[string]smplkit.JobEnvironment)
+	}
+	tmp := &smplkit.Job{Environments: envs}
+	if err := applyJobEnvToggles(tmp, in.enableEnvs, in.disableEnvs); err != nil {
+		return nil, err
+	}
+	return tmp.Environments, nil
+}
+
+// applyJobEnvToggles flips the enabled bit for the named environments on a
+// job's Environments map, preserving any existing per-environment
+// configuration override. --enable-env and --disable-env may not name the
+// same environment.
+func applyJobEnvToggles(job *smplkit.Job, enableEnvs, disableEnvs []string) error {
+	if len(enableEnvs) == 0 && len(disableEnvs) == 0 {
+		return nil
+	}
+	for _, e := range enableEnvs {
+		for _, d := range disableEnvs {
+			if e == d {
+				return fmt.Errorf("environment %q given to both --enable-env and --disable-env", e)
+			}
+		}
+	}
+	if job.Environments == nil {
+		job.Environments = make(map[string]smplkit.JobEnvironment)
+	}
+	setEnabled := func(env string, enabled bool) {
+		cur := job.Environments[env]
+		cur.Enabled = enabled
+		job.Environments[env] = cur
+	}
+	for _, env := range enableEnvs {
+		setEnabled(env, true)
+	}
+	for _, env := range disableEnvs {
+		setEnabled(env, false)
+	}
+	return nil
 }
 
 // buildJobHTTPConfig assembles the HTTP request configuration from the -f
@@ -576,6 +714,9 @@ func applyJobInputsToModel(job *smplkit.Job, shape *jobFileShape, in jobInputs) 
 	if shape != nil {
 		applyJobFileToModel(job, shape)
 	}
+	if err := applyJobEnvToggles(job, in.enableEnvs, in.disableEnvs); err != nil {
+		return err
+	}
 	if in.nameSet {
 		job.Name = in.name
 	}
@@ -615,8 +756,8 @@ func applyJobFileToModel(job *smplkit.Job, shape *jobFileShape) {
 	if shape.Description != nil {
 		job.Description = shape.Description
 	}
-	if shape.Enabled != nil {
-		job.Enabled = *shape.Enabled
+	if shape.Environments != nil {
+		job.Environments = jobEnvFileToModel(shape.Environments)
 	}
 	if shape.Schedule != "" {
 		job.Schedule = shape.Schedule

@@ -696,18 +696,35 @@ func enabledEnvKeys(m map[string]smplkit.ForwarderEnvironment) []string {
 // `get -o json` snapshot replayed through `apply -f` preserves
 // credentials.
 type JobAttr struct {
-	ID                string            `json:"id" yaml:"id"`
-	Name              string            `json:"name" yaml:"name"`
-	Description       *string           `json:"description,omitempty" yaml:"description,omitempty"`
-	Enabled           bool              `json:"enabled" yaml:"enabled"`
-	Type              string            `json:"type,omitempty" yaml:"type,omitempty"`
-	Schedule          string            `json:"schedule" yaml:"schedule"`
-	ConcurrencyPolicy string            `json:"concurrency_policy,omitempty" yaml:"concurrency_policy,omitempty"`
-	Configuration     JobHTTPConfigAttr `json:"configuration" yaml:"configuration"`
-	NextRunAt         *time.Time        `json:"next_run_at,omitempty" yaml:"next_run_at,omitempty"`
-	CreatedAt         *time.Time        `json:"created_at,omitempty" yaml:"created_at,omitempty"`
-	UpdatedAt         *time.Time        `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
-	Version           *int              `json:"version,omitempty" yaml:"version,omitempty"`
+	ID          string  `json:"id" yaml:"id"`
+	Name        string  `json:"name" yaml:"name"`
+	Description *string `json:"description,omitempty" yaml:"description,omitempty"`
+	// Enabled is the read-only roll-up: true when the job is enabled in at
+	// least one environment. Derived server-side from Environments, so it is
+	// surfaced on reads but ignored on writes — set enablement per
+	// environment via Environments.
+	Enabled bool `json:"enabled" yaml:"enabled"`
+	// Recurring is read-only: true for a cron schedule, false for a one-off
+	// (datetime / "now") schedule. Nil for an unsaved job.
+	Recurring         *bool                 `json:"recurring,omitempty" yaml:"recurring,omitempty"`
+	Type              string                `json:"type,omitempty" yaml:"type,omitempty"`
+	Schedule          string                `json:"schedule" yaml:"schedule"`
+	ConcurrencyPolicy string                `json:"concurrency_policy,omitempty" yaml:"concurrency_policy,omitempty"`
+	Environments      map[string]JobEnvAttr `json:"environments,omitempty" yaml:"environments,omitempty"`
+	Configuration     JobHTTPConfigAttr     `json:"configuration" yaml:"configuration"`
+	NextRunAt         *time.Time            `json:"next_run_at,omitempty" yaml:"next_run_at,omitempty"`
+	CreatedAt         *time.Time            `json:"created_at,omitempty" yaml:"created_at,omitempty"`
+	UpdatedAt         *time.Time            `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
+	Version           *int                  `json:"version,omitempty" yaml:"version,omitempty"`
+}
+
+// JobEnvAttr is the JSON/YAML shape for a job's per-environment override: a
+// recurring job fires in an environment only when that environment's entry
+// has enabled=true, and an optional configuration that fully replaces the
+// base configuration in that environment (omit it to inherit the base).
+type JobEnvAttr struct {
+	Enabled       bool               `json:"enabled" yaml:"enabled"`
+	Configuration *JobHTTPConfigAttr `json:"configuration,omitempty" yaml:"configuration,omitempty"`
 }
 
 // JobHTTPConfigAttr is the JSON/YAML shape for the HTTP request a job
@@ -748,11 +765,12 @@ func jobHTTPConfigToAttr(c smplkit.HttpConfig) JobHTTPConfigAttr {
 
 // JobToAttr projects a smplkit.Job onto its attribute shape.
 func JobToAttr(j *smplkit.Job) JobAttr {
-	return JobAttr{
+	a := JobAttr{
 		ID:                j.ID,
 		Name:              j.Name,
 		Description:       j.Description,
 		Enabled:           j.Enabled,
+		Recurring:         j.Recurring,
 		Type:              j.Type,
 		Schedule:          j.Schedule,
 		ConcurrencyPolicy: j.ConcurrencyPolicy,
@@ -762,6 +780,19 @@ func JobToAttr(j *smplkit.Job) JobAttr {
 		UpdatedAt:         j.UpdatedAt,
 		Version:           j.Version,
 	}
+	if len(j.Environments) > 0 {
+		envs := make(map[string]JobEnvAttr, len(j.Environments))
+		for k, e := range j.Environments {
+			ea := JobEnvAttr{Enabled: e.Enabled}
+			if e.Configuration != nil {
+				c := jobHTTPConfigToAttr(*e.Configuration)
+				ea.Configuration = &c
+			}
+			envs[k] = ea
+		}
+		a.Environments = envs
+	}
+	return a
 }
 
 // RenderJob writes a single job.
@@ -798,17 +829,33 @@ func (r Renderer) RenderJobs(js []*smplkit.Job) error {
 
 func (r Renderer) renderJobTable(js []*smplkit.Job) error {
 	tw := newTabWriter(r.Out)
-	fmt.Fprintln(tw, "ID\tNAME\tSCHEDULE\tENABLED\tMETHOD\tURL\tNEXT RUN")
+	fmt.Fprintln(tw, "ID\tNAME\tSCHEDULE\tENABLED ENVS\tMETHOD\tURL\tNEXT RUN")
 	for _, j := range js {
 		method := string(j.Configuration.Method)
 		if method == "" {
 			method = "POST"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%t\t%s\t%s\t%s\n",
-			j.ID, j.Name, j.Schedule, j.Enabled, method,
-			j.Configuration.URL, formatTime(j.NextRunAt))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			j.ID, j.Name, j.Schedule, strings.Join(enabledJobEnvKeys(j.Environments), ","),
+			method, j.Configuration.URL, formatTime(j.NextRunAt))
 	}
 	return tw.Flush()
+}
+
+// enabledJobEnvKeys returns the sorted environment keys in which the job is
+// enabled. A recurring job fires only in these environments.
+func enabledJobEnvKeys(m map[string]smplkit.JobEnvironment) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(m))
+	for k, e := range m {
+		if e.Enabled {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // ── Run ──────────────────────────────────────────────────────────────
@@ -817,9 +864,13 @@ func (r Renderer) renderJobTable(js []*smplkit.Job) error {
 // complete projection of the SDK Run model; timing and forensics fields
 // are omitempty since a freshly-triggered run has not populated them yet.
 type RunAttr struct {
-	ID                string                 `json:"id" yaml:"id"`
-	Job               string                 `json:"job" yaml:"job"`
-	JobVersion        *int                   `json:"job_version,omitempty" yaml:"job_version,omitempty"`
+	ID         string `json:"id" yaml:"id"`
+	Job        string `json:"job" yaml:"job"`
+	JobVersion *int   `json:"job_version,omitempty" yaml:"job_version,omitempty"`
+	// Environment is the environment this run executed in. A scheduled run
+	// inherits the firing job-environment; a manual run uses the environment
+	// it was triggered in; a rerun copies its source run's environment.
+	Environment       string                 `json:"environment" yaml:"environment"`
 	Trigger           string                 `json:"trigger" yaml:"trigger"`
 	RerunOf           *string                `json:"rerun_of,omitempty" yaml:"rerun_of,omitempty"`
 	Status            string                 `json:"status" yaml:"status"`
@@ -842,6 +893,7 @@ func RunToAttr(run *smplkit.Run) RunAttr {
 		ID:                run.ID,
 		Job:               run.Job,
 		JobVersion:        run.JobVersion,
+		Environment:       run.Environment,
 		Trigger:           run.Trigger,
 		RerunOf:           run.RerunOf,
 		Status:            run.Status,
@@ -893,10 +945,10 @@ func (r Renderer) RenderRuns(runs []*smplkit.Run) error {
 
 func (r Renderer) renderRunTable(runs []*smplkit.Run) error {
 	tw := newTabWriter(r.Out)
-	fmt.Fprintln(tw, "ID\tJOB\tTRIGGER\tSTATUS\tCREATED")
+	fmt.Fprintln(tw, "ID\tJOB\tENV\tTRIGGER\tSTATUS\tCREATED")
 	for _, run := range runs {
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
-			run.ID, run.Job, run.Trigger, run.Status, formatTime(run.CreatedAt))
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			run.ID, run.Job, run.Environment, run.Trigger, run.Status, formatTime(run.CreatedAt))
 	}
 	return tw.Flush()
 }

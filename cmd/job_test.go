@@ -169,7 +169,6 @@ func TestBuildJobForCreate_RequiresSchedule(t *testing.T) {
 
 func TestBuildJobForCreate_AppliesFileOptions(t *testing.T) {
 	ns := testJobsClient(t)
-	enabled := false
 	desc := "control-tower housekeeping"
 	// A non-default ConcurrencyPolicy so the WithJobConcurrencyPolicy branch
 	// is genuinely exercised (the SDK's New() already defaults to "ALLOW",
@@ -178,10 +177,13 @@ func TestBuildJobForCreate_AppliesFileOptions(t *testing.T) {
 	shape := &jobFileShape{
 		Name:              "From File",
 		Schedule:          "0 4 * * *", // schedule falls back to the file
-		Enabled:           &enabled,
 		Description:       &desc,
 		ConcurrencyPolicy: "FORBID",
-		Configuration:     &output.JobHTTPConfigAttr{URL: "https://file.test"},
+		Environments: map[string]jobEnvFileShape{
+			"production": {Enabled: true},
+			"staging":    {Enabled: false},
+		},
+		Configuration: &output.JobHTTPConfigAttr{URL: "https://file.test"},
 	}
 	job, err := buildJobForCreate(ns, "j", shape, jobInputs{})
 	if err != nil {
@@ -193,8 +195,11 @@ func TestBuildJobForCreate_AppliesFileOptions(t *testing.T) {
 	if job.Schedule != "0 4 * * *" {
 		t.Errorf("schedule should fall back to the file: %q", job.Schedule)
 	}
-	if job.Enabled {
-		t.Error("enabled=false from file should be applied")
+	if !job.Environments["production"].Enabled {
+		t.Error("production should be enabled from the file's environments map")
+	}
+	if job.Environments["staging"].Enabled {
+		t.Error("staging should be disabled from the file's environments map")
 	}
 	if job.Description == nil || *job.Description != desc {
 		t.Errorf("description from file: %v", job.Description)
@@ -220,7 +225,7 @@ func TestApplyJobInputsToModel_PreservesUnspecified(t *testing.T) {
 		Name:              "Original",
 		Description:       &desc,
 		Schedule:          "0 0 * * *",
-		Enabled:           false,
+		Environments:      map[string]smplkit.JobEnvironment{"production": {Enabled: true}},
 		ConcurrencyPolicy: "ALLOW",
 		Configuration: smplkit.HttpConfig{
 			URL:           "https://orig.test",
@@ -249,8 +254,8 @@ func TestApplyJobInputsToModel_PreservesUnspecified(t *testing.T) {
 	if existing.Description == nil || *existing.Description != "nightly" {
 		t.Errorf("description should be preserved: %v", existing.Description)
 	}
-	if existing.Enabled {
-		t.Error("enabled=false should be preserved (not flipped to the New() default)")
+	if !existing.Environments["production"].Enabled {
+		t.Error("environments enablement should be preserved when no env flags are passed")
 	}
 	if existing.ConcurrencyPolicy != "ALLOW" {
 		t.Errorf("concurrency policy should be preserved: %q", existing.ConcurrencyPolicy)
@@ -486,6 +491,129 @@ func TestIsJobNotFound(t *testing.T) {
 	}
 	if isJobNotFound(nil) {
 		t.Error("nil must not read as not-found")
+	}
+}
+
+func TestApplyJobEnvToggles_EnableDisablePreserveConfig(t *testing.T) {
+	// A pre-existing override carries a per-environment configuration; a
+	// --disable-env on that environment must flip enabled without dropping
+	// the configuration, and --enable-env on a fresh environment creates it.
+	job := &smplkit.Job{
+		Environments: map[string]smplkit.JobEnvironment{
+			"production": {Enabled: true, Configuration: &smplkit.HttpConfig{URL: "https://prod.test"}},
+		},
+	}
+	if err := applyJobEnvToggles(job, []string{"staging"}, []string{"production"}); err != nil {
+		t.Fatalf("applyJobEnvToggles: %v", err)
+	}
+	if job.Environments["production"].Enabled {
+		t.Error("production should be disabled after --disable-env")
+	}
+	if cfg := job.Environments["production"].Configuration; cfg == nil || cfg.URL != "https://prod.test" {
+		t.Errorf("production configuration override should be preserved: %+v", cfg)
+	}
+	if !job.Environments["staging"].Enabled {
+		t.Error("staging should be enabled after --enable-env")
+	}
+}
+
+func TestApplyJobEnvToggles_Conflict(t *testing.T) {
+	if err := applyJobEnvToggles(&smplkit.Job{}, []string{"production"}, []string{"production"}); err == nil {
+		t.Fatal("expected an error when an environment is both enabled and disabled")
+	}
+}
+
+func TestApplyJobEnvToggles_NoFlagsNoOp(t *testing.T) {
+	job := &smplkit.Job{}
+	if err := applyJobEnvToggles(job, nil, nil); err != nil {
+		t.Fatalf("applyJobEnvToggles: %v", err)
+	}
+	if job.Environments != nil {
+		t.Errorf("no toggles should not allocate an environments map: %v", job.Environments)
+	}
+}
+
+func TestBuildJobEnvironments_FileAndToggles(t *testing.T) {
+	// File seeds production+staging; --enable-env flips staging on and
+	// --disable-env flips production off; flags win over the file.
+	shape := &jobFileShape{
+		Environments: map[string]jobEnvFileShape{
+			"production": {Enabled: true},
+			"staging":    {Enabled: false},
+		},
+	}
+	in := jobInputs{enableEnvs: []string{"staging"}, disableEnvs: []string{"production"}}
+	envs, err := buildJobEnvironments(shape, in)
+	if err != nil {
+		t.Fatalf("buildJobEnvironments: %v", err)
+	}
+	if envs["production"].Enabled {
+		t.Error("production should be disabled (flag wins over file)")
+	}
+	if !envs["staging"].Enabled {
+		t.Error("staging should be enabled (flag wins over file)")
+	}
+}
+
+func TestBuildJobEnvironments_TogglesOnly(t *testing.T) {
+	envs, err := buildJobEnvironments(nil, jobInputs{enableEnvs: []string{"production"}})
+	if err != nil {
+		t.Fatalf("buildJobEnvironments: %v", err)
+	}
+	if !envs["production"].Enabled {
+		t.Errorf("production should be enabled from --enable-env alone: %+v", envs)
+	}
+}
+
+func TestApplyJobInputsToModel_EnvToggles(t *testing.T) {
+	existing := &smplkit.Job{
+		ID:            "j",
+		Environments:  map[string]smplkit.JobEnvironment{"production": {Enabled: true}},
+		Configuration: smplkit.HttpConfig{URL: "https://orig.test"},
+	}
+	in := jobInputs{enableEnvs: []string{"staging"}, disableEnvs: []string{"production"}}
+	if err := applyJobInputsToModel(existing, nil, in); err != nil {
+		t.Fatalf("applyJobInputsToModel: %v", err)
+	}
+	if existing.Environments["production"].Enabled {
+		t.Error("production should be disabled after --disable-env on apply")
+	}
+	if !existing.Environments["staging"].Enabled {
+		t.Error("staging should be enabled after --enable-env on apply")
+	}
+}
+
+func TestApplyJobInputsToModel_EnvToggleConflict(t *testing.T) {
+	existing := &smplkit.Job{ID: "j", Configuration: smplkit.HttpConfig{URL: "https://x.test"}}
+	in := jobInputs{enableEnvs: []string{"production"}, disableEnvs: []string{"production"}}
+	if err := applyJobInputsToModel(existing, nil, in); err == nil {
+		t.Error("expected error when an env is both enabled and disabled on apply")
+	}
+}
+
+func TestApplyJobFileToModel_FullReplacesEnvironments(t *testing.T) {
+	// A file `environments` map full-replaces the model's environments —
+	// matching the audit forwarder noun's file semantics, with per-env
+	// configuration overrides carried through.
+	existing := &smplkit.Job{
+		ID:            "j",
+		Environments:  map[string]smplkit.JobEnvironment{"production": {Enabled: true}},
+		Configuration: smplkit.HttpConfig{URL: "https://orig.test"},
+	}
+	shape := &jobFileShape{
+		Environments: map[string]jobEnvFileShape{
+			"staging": {Enabled: true, Configuration: &output.JobHTTPConfigAttr{URL: "https://staging.test"}},
+		},
+	}
+	applyJobFileToModel(existing, shape)
+	if _, ok := existing.Environments["production"]; ok {
+		t.Error("production should be gone after a full-replace from the file")
+	}
+	if !existing.Environments["staging"].Enabled {
+		t.Error("staging should be enabled from the file")
+	}
+	if cfg := existing.Environments["staging"].Configuration; cfg == nil || cfg.URL != "https://staging.test" {
+		t.Errorf("staging per-env configuration override should be applied: %+v", cfg)
 	}
 }
 

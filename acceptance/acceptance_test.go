@@ -444,12 +444,14 @@ func TestAccJob_CRUDAndApply(t *testing.T) {
 		t.Errorf("apply clobbered the schedule while rotating header: %v", j)
 	}
 
-	// apply (create path) — a brand-new id upserts into existence.
+	// apply (create path) — a brand-new id upserts into existence. A one-off
+	// ("now") job is born in a single environment, named with --env.
 	id2 := uniqueID(t, "job2")
 	t.Cleanup(func() { _ = deleteSilent(t, "job", id2) })
 	mustRun(t, "job", "apply", id2,
 		"--schedule", "now",
-		"--url", "https://example.com/once")
+		"--url", "https://example.com/once",
+		"--env", "production")
 	out = mustRun(t, "job", "get", id2, "-o", "json")
 	var j2 map[string]interface{}
 	if err := json.Unmarshal([]byte(out), &j2); err != nil {
@@ -475,24 +477,31 @@ func TestAccJobRuns(t *testing.T) {
 	id := uniqueID(t, "jobrun")
 	t.Cleanup(func() { _ = deleteSilent(t, "job", id) })
 
-	// An enabled recurring job. The cron is intentionally rare (Jan 1) so
-	// the scheduler won't fire it during the test; runs are driven manually.
+	// An enabled recurring job. Enablement is per-environment (the base
+	// `enabled` is a read-only roll-up), so it is turned on in `production`
+	// via --enable-env. The cron is intentionally rare (Jan 1) so the
+	// scheduler won't fire it during the test; runs are driven manually.
+	const env = "production"
 	mustRun(t, "job", "create", id,
 		"--name", "Acc Job Runs",
 		"--schedule", "0 0 1 1 *",
 		"--url", "https://example.com/run",
-		"--method", "POST")
+		"--method", "POST",
+		"--enable-env", env)
 
-	// Trigger a manual run.
-	out := mustRun(t, "job", "run", id, "-o", "json")
+	// Trigger a manual run in the production environment.
+	out := mustRun(t, "job", "run", id, "--env", env, "-o", "json")
 	run := mustParseObj(t, out)
 	runID, _ := run["id"].(string)
 	if runID == "" || run["trigger"] != "MANUAL" || run["job"] != id {
 		t.Fatalf("unexpected manual run: %v", run)
 	}
+	if run["environment"] != env {
+		t.Errorf("manual run should be stamped with environment %q: %v", env, run)
+	}
 
-	// It appears in the job's run history.
-	out = mustRun(t, "job", "runs", "list", "--job", id, "-o", "json")
+	// It appears in the job's run history, scoped to the production environment.
+	out = mustRun(t, "job", "runs", "list", "--job", id, "--env", env, "-o", "json")
 	var runs []map[string]interface{}
 	if err := json.Unmarshal([]byte(out), &runs); err != nil {
 		t.Fatalf("parse runs list: %v\n%s", err, out)
@@ -533,19 +542,18 @@ func TestAccJobUsageAndListFilters(t *testing.T) {
 		t.Cleanup(func() { _ = deleteSilent(t, "job", id) })
 	}
 
-	// Enabled recurring (cron) job.
+	const env = "production"
+	// Enabled recurring (cron) job — turned on in production via --enable-env.
 	mustRun(t, "job", "create", idRecurring,
-		"--schedule", "0 0 1 1 *", "--url", "https://example.com/cron")
-	// Enabled one-off (future datetime) job — stays enabled until it fires.
+		"--schedule", "0 0 1 1 *", "--url", "https://example.com/cron", "--enable-env", env)
+	// Enabled one-off (future datetime) job — born in production via --env,
+	// stays enabled there until it fires.
 	mustRun(t, "job", "create", idOneOff,
-		"--schedule", "2099-01-01T00:00:00Z", "--url", "https://example.com/once")
-	// Disabled job — enabled=false is only settable via -f, so write a file.
-	disabledFile := filepath.Join(t.TempDir(), "disabled.json")
-	body := `{"schedule":"0 0 1 1 *","enabled":false,"configuration":{"url":"https://example.com/off","method":"POST"}}`
-	if err := os.WriteFile(disabledFile, []byte(body), 0o600); err != nil {
-		t.Fatalf("write disabled file: %v", err)
-	}
-	mustRun(t, "job", "create", idDisabled, "-f", disabledFile)
+		"--schedule", "2099-01-01T00:00:00Z", "--url", "https://example.com/once", "--env", env)
+	// Disabled job — created without enabling any environment, so it is
+	// enabled nowhere and the read-only roll-up `enabled` is false.
+	mustRun(t, "job", "create", idDisabled,
+		"--schedule", "0 0 1 1 *", "--url", "https://example.com/off")
 
 	// --recurring returns the cron job, not the one-off.
 	rec := mustRun(t, "job", "list", "--recurring", "--quiet", "--all")
