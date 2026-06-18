@@ -11,15 +11,14 @@ import (
 	"github.com/smplkit/cli/internal/output"
 )
 
-// TestJobListCmd_MutuallyExclusiveFilters verifies the list filter pairs
-// reject conflicting flags before any client call, so the error is a clean
+// TestJobListCmd_MutuallyExclusiveFilters verifies the list filter pair
+// rejects conflicting flags before any client call, so the error is a clean
 // validation failure rather than a wasted round-trip.
 func TestJobListCmd_MutuallyExclusiveFilters(t *testing.T) {
 	cases := []struct {
 		args []string
 		want string
 	}{
-		{[]string{"--enabled", "--disabled"}, "--enabled and --disabled are mutually exclusive"},
 		{[]string{"--recurring", "--one-off"}, "--recurring and --one-off are mutually exclusive"},
 	}
 	for _, c := range cases {
@@ -31,6 +30,16 @@ func TestJobListCmd_MutuallyExclusiveFilters(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("args %v: got err %v, want containing %q", c.args, err, c.want)
 		}
+	}
+}
+
+// TestJobListCmd_NoEnabledFilter verifies the removed --enabled/--disabled
+// list filters are gone (next-fire and enablement are per-environment now;
+// the filter[enabled] list filter no longer exists in the API).
+func TestJobListCmd_NoEnabledFilter(t *testing.T) {
+	cmd := jobListCmd()
+	if cmd.Flags().Lookup("enabled") != nil || cmd.Flags().Lookup("disabled") != nil {
+		t.Fatal("legacy --enabled/--disabled job-list flags must be removed")
 	}
 }
 

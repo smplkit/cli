@@ -712,7 +712,6 @@ type JobAttr struct {
 	ConcurrencyPolicy string                `json:"concurrency_policy,omitempty" yaml:"concurrency_policy,omitempty"`
 	Environments      map[string]JobEnvAttr `json:"environments,omitempty" yaml:"environments,omitempty"`
 	Configuration     JobHTTPConfigAttr     `json:"configuration" yaml:"configuration"`
-	NextRunAt         *time.Time            `json:"next_run_at,omitempty" yaml:"next_run_at,omitempty"`
 	CreatedAt         *time.Time            `json:"created_at,omitempty" yaml:"created_at,omitempty"`
 	UpdatedAt         *time.Time            `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
 	Version           *int                  `json:"version,omitempty" yaml:"version,omitempty"`
@@ -723,7 +722,14 @@ type JobAttr struct {
 // has enabled=true, and an optional configuration that fully replaces the
 // base configuration in that environment (omit it to inherit the base).
 type JobEnvAttr struct {
-	Enabled       bool               `json:"enabled" yaml:"enabled"`
+	Enabled bool `json:"enabled" yaml:"enabled"`
+	// Schedule is an optional per-environment cron override that varies the
+	// cadence for this environment only (recurring jobs). Empty inherits the
+	// job's base schedule. Settable and round-trips through apply -f.
+	Schedule string `json:"schedule,omitempty" yaml:"schedule,omitempty"`
+	// NextRunAt is the read-only next scheduled fire time in this environment.
+	// Nil when the environment is not enabled, or once a one-off run has fired.
+	NextRunAt     *time.Time         `json:"next_run_at,omitempty" yaml:"next_run_at,omitempty"`
 	Configuration *JobHTTPConfigAttr `json:"configuration,omitempty" yaml:"configuration,omitempty"`
 }
 
@@ -775,7 +781,6 @@ func JobToAttr(j *smplkit.Job) JobAttr {
 		Schedule:          j.Schedule,
 		ConcurrencyPolicy: j.ConcurrencyPolicy,
 		Configuration:     jobHTTPConfigToAttr(j.Configuration),
-		NextRunAt:         j.NextRunAt,
 		CreatedAt:         j.CreatedAt,
 		UpdatedAt:         j.UpdatedAt,
 		Version:           j.Version,
@@ -783,7 +788,11 @@ func JobToAttr(j *smplkit.Job) JobAttr {
 	if len(j.Environments) > 0 {
 		envs := make(map[string]JobEnvAttr, len(j.Environments))
 		for k, e := range j.Environments {
-			ea := JobEnvAttr{Enabled: e.Enabled}
+			ea := JobEnvAttr{
+				Enabled:   e.Enabled,
+				Schedule:  e.Schedule,
+				NextRunAt: e.NextRunAt,
+			}
 			if e.Configuration != nil {
 				c := jobHTTPConfigToAttr(*e.Configuration)
 				ea.Configuration = &c
@@ -829,15 +838,15 @@ func (r Renderer) RenderJobs(js []*smplkit.Job) error {
 
 func (r Renderer) renderJobTable(js []*smplkit.Job) error {
 	tw := newTabWriter(r.Out)
-	fmt.Fprintln(tw, "ID\tNAME\tSCHEDULE\tENABLED ENVS\tMETHOD\tURL\tNEXT RUN")
+	fmt.Fprintln(tw, "ID\tNAME\tSCHEDULE\tENABLED ENVS\tMETHOD\tURL")
 	for _, j := range js {
 		method := string(j.Configuration.Method)
 		if method == "" {
 			method = "POST"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			j.ID, j.Name, j.Schedule, strings.Join(enabledJobEnvKeys(j.Environments), ","),
-			method, j.Configuration.URL, formatTime(j.NextRunAt))
+			method, j.Configuration.URL)
 	}
 	return tw.Flush()
 }

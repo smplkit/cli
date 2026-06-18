@@ -30,8 +30,8 @@ github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZN
 github.com/rogpeppe/go-internal v1.9.0 h1:73kH8U+JUqXU8lRuOHeVHaa/SZPifC7BkcraZVejAe8=
 github.com/rogpeppe/go-internal v1.9.0/go.mod h1:WtVeX8xhTBvf0smdhujwtBcq4Qrzq/fJaraNFVN+nFs=
 github.com/russross/blackfriday/v2 v2.1.0/go.mod h1:+Rmxgy9KzJVeS9/2gXHxylqXiyQDYRxCVz55jmeOWTM=
-github.com/smplkit/go-sdk/v3 v3.0.144 h1:ONuSZw2eA+PyDbLbIlTIwkgo+xdsLc2ooLsMPjZJnr8=
-github.com/smplkit/go-sdk/v3 v3.0.144/go.mod h1:aWjJ3o0Zq5cPKCi0/5ShgzYFW81s3GjCzOUL3nmw/ts=
+github.com/smplkit/go-sdk/v3 v3.0.145 h1:CXhhoh/Oqz0SN1HZLb3Iem629O6k1ARXaagDVy+yLAA=
+github.com/smplkit/go-sdk/v3 v3.0.145/go.mod h1:aWjJ3o0Zq5cPKCi0/5ShgzYFW81s3GjCzOUL3nmw/ts=
 github.com/spf13/cobra v1.10.2 h1:DMTTonx5m65Ic0GOoRY2c16WCbHxOOw6xxezuLaBpcU=
 github.com/spf13/cobra v1.10.2/go.mod h1:7C1pvHqHw5A4vrJfjNwvOdzYu0Gml16OCs2GRiTUUS4=
 github.com/spf13/pflag v1.0.9/go.mod h1:McXfInJRrz4CZXVZOBLb0bTZqETkiAhM9Iw0y3An2Bg=

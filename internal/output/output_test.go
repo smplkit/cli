@@ -216,7 +216,9 @@ func TestRenderer_Job_JSON(t *testing.T) {
 		Type:              "http",
 		Schedule:          "0 3 * * *",
 		ConcurrencyPolicy: "ALLOW",
-		NextRunAt:         &next,
+		Environments: map[string]smplkit.JobEnvironment{
+			"production": {Enabled: true, NextRunAt: &next},
+		},
 		Configuration: smplkit.HttpConfig{
 			URL:    "https://admin.example.com/execute",
 			Method: smplkit.JobHttpMethodPost,
@@ -247,6 +249,12 @@ func TestRenderer_Job_JSON(t *testing.T) {
 	}
 	if got.Configuration.Body == nil || *got.Configuration.Body != "ping" {
 		t.Errorf("body: %v", got.Configuration.Body)
+	}
+	// Next-fire is per-environment now: it surfaces under environments, not
+	// at the top level of the job.
+	prod, ok := got.Environments["production"]
+	if !ok || prod.NextRunAt == nil || !prod.NextRunAt.Equal(next) {
+		t.Errorf("per-env next_run_at not projected: %+v", got.Environments)
 	}
 }
 
@@ -291,8 +299,12 @@ func TestRenderer_Jobs_Table(t *testing.T) {
 	if !strings.HasPrefix(out, "ID") {
 		t.Errorf("expected header, got %q", out)
 	}
-	if !strings.Contains(out, "SCHEDULE") || !strings.Contains(out, "NEXT RUN") {
+	if !strings.Contains(out, "SCHEDULE") || !strings.Contains(out, "ENABLED ENVS") {
 		t.Errorf("missing headers: %q", out)
+	}
+	// Next-fire is per-environment now and no longer a flat-table column.
+	if strings.Contains(out, "NEXT RUN") {
+		t.Errorf("top-level NEXT RUN column should be gone: %q", out)
 	}
 	if !strings.Contains(out, "https://a.test") || !strings.Contains(out, "GET") {
 		t.Errorf("missing row a: %q", out)

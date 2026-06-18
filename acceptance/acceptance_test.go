@@ -565,15 +565,12 @@ func TestAccJobUsageAndListFilters(t *testing.T) {
 	if !lineContains(once, idOneOff) || lineContains(once, idRecurring) {
 		t.Errorf("--one-off filter wrong: want %q present, %q absent:\n%s", idOneOff, idRecurring, once)
 	}
-	// --disabled returns the disabled job, not the enabled ones.
-	off := mustRun(t, "job", "list", "--disabled", "--quiet", "--all")
-	if !lineContains(off, idDisabled) || lineContains(off, idRecurring) {
-		t.Errorf("--disabled filter wrong: want %q present, %q absent:\n%s", idDisabled, idRecurring, off)
-	}
-	// --enabled returns the enabled jobs, not the disabled one.
-	on := mustRun(t, "job", "list", "--enabled", "--quiet", "--all")
-	if !lineContains(on, idRecurring) || lineContains(on, idDisabled) {
-		t.Errorf("--enabled filter wrong: want %q present, %q absent:\n%s", idRecurring, idDisabled, on)
+	// The state-based filter[enabled] list filter was removed: enablement is
+	// per-environment now and the derived roll-up has no list filter. The
+	// disabled job still exists and an unfiltered list returns every job.
+	all := mustRun(t, "job", "list", "--quiet", "--all")
+	if !lineContains(all, idRecurring) || !lineContains(all, idOneOff) || !lineContains(all, idDisabled) {
+		t.Errorf("unfiltered list should return every job:\n%s", all)
 	}
 
 	// usage reports the current period and at least our two enabled jobs.

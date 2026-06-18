@@ -39,7 +39,10 @@ type jobFileShape struct {
 // configuration that fully replaces the base configuration there (a nil
 // Configuration inherits the base).
 type jobEnvFileShape struct {
-	Enabled       bool                      `json:"enabled"`
+	Enabled bool `json:"enabled"`
+	// Schedule is an optional per-environment cron override (recurring jobs
+	// only); empty inherits the job's base schedule.
+	Schedule      string                    `json:"schedule,omitempty"`
 	Configuration *output.JobHTTPConfigAttr `json:"configuration,omitempty"`
 }
 
@@ -74,21 +77,16 @@ func jobListCmd() *cobra.Command {
 	var (
 		limit     int
 		all       bool
-		enabled   bool
-		disabled  bool
 		recurring bool
 		oneOff    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List jobs",
-		Long: "List jobs. Filter by state with --enabled/--disabled and by schedule\n" +
-			"cadence with --recurring (cron) / --one-off (datetime or \"now\"). Each\n" +
-			"pair is mutually exclusive; omit both to return every job.",
+		Long: "List jobs. Filter by schedule cadence with --recurring (cron) /\n" +
+			"--one-off (datetime or \"now\"). The pair is mutually exclusive; omit\n" +
+			"both to return every job.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if enabled && disabled {
-				return fmt.Errorf("--enabled and --disabled are mutually exclusive")
-			}
 			if recurring && oneOff {
 				return fmt.Errorf("--recurring and --one-off are mutually exclusive")
 			}
@@ -99,13 +97,6 @@ func jobListCmd() *cobra.Command {
 			ctx := cliContext(cmd)
 			ns := client.Jobs()
 			input := smplkit.ListJobsInput{}
-			if enabled {
-				t := true
-				input.Enabled = &t
-			} else if disabled {
-				f := false
-				input.Enabled = &f
-			}
 			if recurring {
 				t := true
 				input.Recurring = &t
@@ -130,15 +121,13 @@ func jobListCmd() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&limit, "limit", 0, "page size (server default when unset)")
 	cmd.Flags().BoolVar(&all, "all", false, "fetch every page")
-	cmd.Flags().BoolVar(&enabled, "enabled", false, "only enabled jobs")
-	cmd.Flags().BoolVar(&disabled, "disabled", false, "only disabled (paused) jobs")
 	cmd.Flags().BoolVar(&recurring, "recurring", false, "only recurring (cron) jobs")
 	cmd.Flags().BoolVar(&oneOff, "one-off", false, "only one-off (datetime / \"now\") jobs")
 	return cmd
 }
 
 // fetchAllJobs walks every page of the jobs collection, preserving the
-// caller's filters (input.Enabled / input.Recurring). The jobs List
+// caller's filters (input.Recurring). The jobs List
 // surface takes a ListJobsInput (offset pagination) rather than the
 // variadic ListOption fetcher paginate.All expects, so it gets its own
 // small page-walker — mirrors fetchAllForwarders.
@@ -594,6 +583,7 @@ func jobEnvFileToModel(envs map[string]jobEnvFileShape) map[string]smplkit.JobEn
 	for k, e := range envs {
 		out[k] = smplkit.JobEnvironment{
 			Enabled:       e.Enabled,
+			Schedule:      e.Schedule,
 			Configuration: jobEnvShapeToConfig(e.Configuration),
 		}
 	}
