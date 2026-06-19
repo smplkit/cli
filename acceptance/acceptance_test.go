@@ -531,13 +531,13 @@ func TestAccJobRuns(t *testing.T) {
 }
 
 // TestAccJobUsageAndListFilters covers `job usage` and the `job list`
-// state/cadence filters against the live jobs service.
+// --kind filter against the live jobs service.
 func TestAccJobUsageAndListFilters(t *testing.T) {
 	accGate(t)
 	idRecurring := uniqueID(t, "jobcron")
 	idOneOff := uniqueID(t, "jobonce")
-	idDisabled := uniqueID(t, "joboff")
-	for _, id := range []string{idRecurring, idOneOff, idDisabled} {
+	idManual := uniqueID(t, "jobman")
+	for _, id := range []string{idRecurring, idOneOff, idManual} {
 		id := id
 		t.Cleanup(func() { _ = deleteSilent(t, "job", id) })
 	}
@@ -550,36 +550,40 @@ func TestAccJobUsageAndListFilters(t *testing.T) {
 	// stays enabled there until it fires.
 	mustRun(t, "job", "create", idOneOff,
 		"--schedule", "2099-01-01T00:00:00Z", "--url", "https://example.com/once", "--env", env)
-	// Disabled job — created without enabling any environment, so it is
-	// enabled nowhere and the read-only roll-up `enabled` is false.
-	mustRun(t, "job", "create", idDisabled,
-		"--schedule", "0 0 1 1 *", "--url", "https://example.com/off")
+	// Manual job — created with NO --schedule, so it never auto-fires and runs
+	// only when triggered. Enabled in production via --enable-env.
+	mustRun(t, "job", "create", idManual,
+		"--url", "https://example.com/manual", "--enable-env", env)
 
-	// --recurring returns the cron job, not the one-off.
-	rec := mustRun(t, "job", "list", "--recurring", "--quiet", "--all")
-	if !lineContains(rec, idRecurring) || lineContains(rec, idOneOff) {
-		t.Errorf("--recurring filter wrong: want %q present, %q absent:\n%s", idRecurring, idOneOff, rec)
+	// --kind recurring returns the cron job, not the one-off or manual job.
+	rec := mustRun(t, "job", "list", "--kind", "recurring", "--quiet", "--all")
+	if !lineContains(rec, idRecurring) || lineContains(rec, idOneOff) || lineContains(rec, idManual) {
+		t.Errorf("--kind recurring wrong: want %q present, %q/%q absent:\n%s", idRecurring, idOneOff, idManual, rec)
 	}
-	// --one-off returns the one-off, not the cron job.
-	once := mustRun(t, "job", "list", "--one-off", "--quiet", "--all")
-	if !lineContains(once, idOneOff) || lineContains(once, idRecurring) {
-		t.Errorf("--one-off filter wrong: want %q present, %q absent:\n%s", idOneOff, idRecurring, once)
+	// --kind one_off returns the one-off, not the cron or manual job.
+	once := mustRun(t, "job", "list", "--kind", "one_off", "--quiet", "--all")
+	if !lineContains(once, idOneOff) || lineContains(once, idRecurring) || lineContains(once, idManual) {
+		t.Errorf("--kind one_off wrong: want %q present, %q/%q absent:\n%s", idOneOff, idRecurring, idManual, once)
 	}
-	// The state-based filter[enabled] list filter was removed: enablement is
-	// per-environment now and the derived roll-up has no list filter. The
-	// disabled job still exists and an unfiltered list returns every job.
+	// --kind manual returns the manual job, not the cron or one-off job.
+	man := mustRun(t, "job", "list", "--kind", "manual", "--quiet", "--all")
+	if !lineContains(man, idManual) || lineContains(man, idRecurring) || lineContains(man, idOneOff) {
+		t.Errorf("--kind manual wrong: want %q present, %q/%q absent:\n%s", idManual, idRecurring, idOneOff, man)
+	}
+	// The default (no --kind) listing returns recurring and manual jobs but
+	// omits one-off jobs — pass --kind one_off to surface those.
 	all := mustRun(t, "job", "list", "--quiet", "--all")
-	if !lineContains(all, idRecurring) || !lineContains(all, idOneOff) || !lineContains(all, idDisabled) {
-		t.Errorf("unfiltered list should return every job:\n%s", all)
+	if !lineContains(all, idRecurring) || !lineContains(all, idManual) || lineContains(all, idOneOff) {
+		t.Errorf("default listing should include recurring+manual and omit one-off:\n%s", all)
 	}
 
-	// usage reports the current period and at least our two enabled jobs.
+	// usage reports the current period and at least our enabled jobs.
 	usage := mustParseObj(t, mustRun(t, "job", "usage", "-o", "json"))
 	if p, _ := usage["period"].(string); p == "" {
 		t.Errorf("usage missing period: %v", usage)
 	}
 	if active, _ := usage["active_jobs"].(float64); active < 2 {
-		t.Errorf("expected active_jobs >= 2 (two enabled jobs created), got %v", usage["active_jobs"])
+		t.Errorf("expected active_jobs >= 2 (multiple enabled jobs created), got %v", usage["active_jobs"])
 	}
 }
 

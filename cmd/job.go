@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	smplkit "github.com/smplkit/go-sdk/v3"
 	"github.com/spf13/cobra"
@@ -77,18 +78,28 @@ func jobListCmd() *cobra.Command {
 	var (
 		limit     int
 		all       bool
-		recurring bool
-		oneOff    bool
+		kind      string
+		scheduled bool
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List jobs",
-		Long: "List jobs. Filter by schedule cadence with --recurring (cron) /\n" +
-			"--one-off (datetime or \"now\"). The pair is mutually exclusive; omit\n" +
-			"both to return every job.",
+		Long: "List jobs. Filter by kind with --kind recurring|manual|one_off. Filter\n" +
+			"to jobs with (or without) an upcoming fire in some environment using\n" +
+			"--scheduled / --scheduled=false. With no --kind, recurring and manual\n" +
+			"jobs are returned; one-off jobs are omitted unless you pass\n" +
+			"--kind one_off.",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if recurring && oneOff {
-				return fmt.Errorf("--recurring and --one-off are mutually exclusive")
+			input := smplkit.ListJobsInput{}
+			if kind != "" {
+				k, err := parseJobKind(kind)
+				if err != nil {
+					return err
+				}
+				input.Kind = &k
+			}
+			if cmd.Flags().Changed("scheduled") {
+				input.Scheduled = &scheduled
 			}
 			client, err := withClient()
 			if err != nil {
@@ -96,14 +107,6 @@ func jobListCmd() *cobra.Command {
 			}
 			ctx := cliContext(cmd)
 			ns := client.Jobs()
-			input := smplkit.ListJobsInput{}
-			if recurring {
-				t := true
-				input.Recurring = &t
-			} else if oneOff {
-				f := false
-				input.Recurring = &f
-			}
 			var jobs []*smplkit.Job
 			if all {
 				jobs, err = fetchAllJobs(ctx, ns, input, limit)
@@ -121,13 +124,25 @@ func jobListCmd() *cobra.Command {
 	}
 	cmd.Flags().IntVar(&limit, "limit", 0, "page size (server default when unset)")
 	cmd.Flags().BoolVar(&all, "all", false, "fetch every page")
-	cmd.Flags().BoolVar(&recurring, "recurring", false, "only recurring (cron) jobs")
-	cmd.Flags().BoolVar(&oneOff, "one-off", false, "only one-off (datetime / \"now\") jobs")
+	cmd.Flags().StringVar(&kind, "kind", "", "filter by kind: recurring|manual|one_off")
+	cmd.Flags().BoolVar(&scheduled, "scheduled", false, "only jobs with (or, with =false, without) an upcoming fire")
 	return cmd
 }
 
+// parseJobKind validates a --kind value and maps it to the SDK enum.
+func parseJobKind(raw string) (smplkit.JobKind, error) {
+	switch k := smplkit.JobKind(raw); k {
+	case smplkit.JobKindRecurring,
+		smplkit.JobKindManual,
+		smplkit.JobKindOneOff:
+		return k, nil
+	default:
+		return "", fmt.Errorf("invalid --kind %q (expected recurring|manual|one_off)", raw)
+	}
+}
+
 // fetchAllJobs walks every page of the jobs collection, preserving the
-// caller's filters (input.Recurring). The jobs List
+// caller's filters (input.Kind / input.Scheduled). The jobs List
 // surface takes a ListJobsInput (offset pagination) rather than the
 // variadic ListOption fetcher paginate.All expects, so it gets its own
 // small page-walker — mirrors fetchAllForwarders.
@@ -520,9 +535,6 @@ func buildJobForCreate(ns *smplkit.JobsClient, id string, shape *jobFileShape, i
 	case shape != nil && shape.Schedule != "":
 		effSchedule = shape.Schedule
 	}
-	if effSchedule == "" {
-		return nil, fmt.Errorf("missing --schedule (or `schedule` in -f file)")
-	}
 
 	cfg, err := buildJobHTTPConfig(shape, in)
 	if err != nil {
@@ -549,7 +561,27 @@ func buildJobForCreate(ns *smplkit.JobsClient, id string, shape *jobFileShape, i
 		}
 	}
 
-	return ns.New(id, effName, effSchedule, cfg, opts...), nil
+	return newJobForSchedule(ns, id, effName, effSchedule, cfg, opts...), nil
+}
+
+// newJobForSchedule classifies effSchedule and picks the matching SDK
+// constructor, mirroring the jobs service's kind derivation:
+//   - "" (no schedule) → a manual job (never auto-fires; runs only on trigger).
+//   - "now" → a one-off scheduled to fire immediately.
+//   - an RFC-3339 datetime → a one-off scheduled to fire at that instant.
+//   - anything else → a recurring job whose schedule is a cron expression.
+func newJobForSchedule(ns *smplkit.JobsClient, id, name, schedule string, cfg smplkit.HttpConfig, opts ...smplkit.JobOption) *smplkit.Job {
+	switch {
+	case schedule == "":
+		return ns.NewManualJob(id, name, cfg, opts...)
+	case strings.EqualFold(schedule, "now"):
+		return ns.Schedule(id, name, time.Now().UTC(), cfg, opts...)
+	default:
+		if when, err := time.Parse(time.RFC3339, schedule); err == nil {
+			return ns.Schedule(id, name, when, cfg, opts...)
+		}
+		return ns.NewRecurringJob(id, name, schedule, cfg, opts...)
+	}
 }
 
 // jobEnvShapeToConfig converts the file/CLI HTTP-config attribute shape

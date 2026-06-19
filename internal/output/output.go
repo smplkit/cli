@@ -704,9 +704,10 @@ type JobAttr struct {
 	// surfaced on reads but ignored on writes — set enablement per
 	// environment via Environments.
 	Enabled bool `json:"enabled" yaml:"enabled"`
-	// Recurring is read-only: true for a cron schedule, false for a one-off
-	// (datetime / "now") schedule. Nil for an unsaved job.
-	Recurring         *bool                 `json:"recurring,omitempty" yaml:"recurring,omitempty"`
+	// Kind is read-only: "recurring" for a cron schedule, "one_off" for a
+	// datetime / "now" schedule, "manual" for no schedule. Nil for an unsaved
+	// job.
+	Kind              *smplkit.JobKind      `json:"kind,omitempty" yaml:"kind,omitempty"`
 	Type              string                `json:"type,omitempty" yaml:"type,omitempty"`
 	Schedule          string                `json:"schedule" yaml:"schedule"`
 	ConcurrencyPolicy string                `json:"concurrency_policy,omitempty" yaml:"concurrency_policy,omitempty"`
@@ -776,7 +777,7 @@ func JobToAttr(j *smplkit.Job) JobAttr {
 		Name:              j.Name,
 		Description:       j.Description,
 		Enabled:           j.Enabled,
-		Recurring:         j.Recurring,
+		Kind:              j.Kind,
 		Type:              j.Type,
 		Schedule:          j.Schedule,
 		ConcurrencyPolicy: j.ConcurrencyPolicy,

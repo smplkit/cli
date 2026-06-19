@@ -5,31 +5,48 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	smplkit "github.com/smplkit/go-sdk/v3"
 
 	"github.com/smplkit/cli/internal/output"
 )
 
-// TestJobListCmd_MutuallyExclusiveFilters verifies the list filter pair
-// rejects conflicting flags before any client call, so the error is a clean
+// TestJobListCmd_InvalidKind verifies --kind rejects a value outside the
+// recurring/manual/one_off set before any client call, so the error is a clean
 // validation failure rather than a wasted round-trip.
-func TestJobListCmd_MutuallyExclusiveFilters(t *testing.T) {
-	cases := []struct {
-		args []string
-		want string
-	}{
-		{[]string{"--recurring", "--one-off"}, "--recurring and --one-off are mutually exclusive"},
+func TestJobListCmd_InvalidKind(t *testing.T) {
+	cmd := jobListCmd()
+	cmd.SetArgs([]string{"--kind", "bogus"})
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	err := cmd.Execute()
+	const want = "invalid --kind"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("--kind bogus: got err %v, want containing %q", err, want)
 	}
-	for _, c := range cases {
-		cmd := jobListCmd()
-		cmd.SetArgs(c.args)
-		cmd.SilenceUsage = true
-		cmd.SilenceErrors = true
-		err := cmd.Execute()
-		if err == nil || !strings.Contains(err.Error(), c.want) {
-			t.Errorf("args %v: got err %v, want containing %q", c.args, err, c.want)
+}
+
+// TestParseJobKind covers the --kind value mapping: each valid spelling maps
+// to its SDK enum, and anything else is rejected.
+func TestParseJobKind(t *testing.T) {
+	cases := map[string]smplkit.JobKind{
+		"recurring": smplkit.JobKindRecurring,
+		"manual":    smplkit.JobKindManual,
+		"one_off":   smplkit.JobKindOneOff,
+	}
+	for in, want := range cases {
+		got, err := parseJobKind(in)
+		if err != nil {
+			t.Errorf("parseJobKind(%q): %v", in, err)
+			continue
 		}
+		if got != want {
+			t.Errorf("parseJobKind(%q) = %q want %q", in, got, want)
+		}
+	}
+	if _, err := parseJobKind("bogus"); err == nil {
+		t.Error("expected error for an invalid --kind value")
 	}
 }
 
@@ -169,10 +186,49 @@ func TestBuildJobForCreate_NameDefaultsToID(t *testing.T) {
 	}
 }
 
-func TestBuildJobForCreate_RequiresSchedule(t *testing.T) {
+// TestBuildJobForCreate_ManualWhenNoSchedule verifies an empty schedule now
+// produces a manual job (no schedule, never auto-fires) rather than an error —
+// the old "missing --schedule" guard is gone. Kind is derived server-side, so
+// it stays nil on the unsaved job; the empty Schedule is what marks it manual.
+func TestBuildJobForCreate_ManualWhenNoSchedule(t *testing.T) {
 	ns := testJobsClient(t)
-	if _, err := buildJobForCreate(ns, "j", nil, jobInputs{url: "https://x.test", urlSet: true}); err == nil {
-		t.Error("expected error without a schedule")
+	job, err := buildJobForCreate(ns, "j", nil, jobInputs{url: "https://x.test", urlSet: true})
+	if err != nil {
+		t.Fatalf("buildJobForCreate: %v", err)
+	}
+	if job.Schedule != "" {
+		t.Errorf("a manual job should have an empty schedule, got %q", job.Schedule)
+	}
+}
+
+// TestNewJobForSchedule_Classifier pins the schedule → constructor mapping:
+// empty → manual (no schedule), "now" → one-off scheduled near now, an
+// RFC-3339 datetime → one-off at that instant, and a cron string → recurring
+// (schedule preserved verbatim).
+func TestNewJobForSchedule_Classifier(t *testing.T) {
+	ns := testJobsClient(t)
+	cfg := smplkit.HttpConfig{URL: "https://x.test"}
+
+	manual := newJobForSchedule(ns, "j", "Job", "", cfg)
+	if manual.Schedule != "" {
+		t.Errorf("manual job schedule should be empty, got %q", manual.Schedule)
+	}
+
+	now := newJobForSchedule(ns, "j", "Job", "now", cfg)
+	if _, err := time.Parse(time.RFC3339, now.Schedule); err != nil {
+		t.Errorf(`"now" should resolve to an RFC-3339 instant, got %q (%v)`, now.Schedule, err)
+	}
+
+	const when = "2099-01-01T00:00:00Z"
+	oneOff := newJobForSchedule(ns, "j", "Job", when, cfg)
+	if oneOff.Schedule != when {
+		t.Errorf("datetime schedule should round-trip, got %q want %q", oneOff.Schedule, when)
+	}
+
+	const cron = "0 0 * * *"
+	recurring := newJobForSchedule(ns, "j", "Job", cron, cfg)
+	if recurring.Schedule != cron {
+		t.Errorf("cron schedule should be preserved verbatim, got %q want %q", recurring.Schedule, cron)
 	}
 }
 
