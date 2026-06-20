@@ -405,6 +405,7 @@ func TestAccJob_CRUDAndApply(t *testing.T) {
 	mustRun(t, "job", "create", id,
 		"--name", "Acc Job",
 		"--schedule", "0 3 * * *",
+		"--timezone", "America/New_York",
 		"--url", "https://example.com/execute",
 		"--method", "POST",
 		"--header", "Authorization: Bearer acc-secret")
@@ -417,20 +418,38 @@ func TestAccJob_CRUDAndApply(t *testing.T) {
 	if j["schedule"] != "0 3 * * *" {
 		t.Errorf("schedule not persisted: %v", j)
 	}
+	if j["timezone"] != "America/New_York" {
+		t.Errorf("timezone not persisted: %v", j)
+	}
 	if jobHeaderValue(j, "Authorization") != "Bearer acc-secret" {
 		t.Errorf("header value not persisted plaintext: %v", j["configuration"])
 	}
 
-	// apply (existing) — change only the schedule. The header value and
-	// every other field must be preserved through the read-modify-write.
+	// apply (existing) — change only the schedule. The header value, the
+	// timezone, and every other field must be preserved through the
+	// read-modify-write.
 	mustRun(t, "job", "apply", id, "--schedule", "*/30 * * * *")
 	out = mustRun(t, "job", "get", id, "-o", "json")
 	_ = json.Unmarshal([]byte(out), &j)
 	if j["schedule"] != "*/30 * * * *" {
 		t.Errorf("apply did not update schedule: %v", j)
 	}
+	if j["timezone"] != "America/New_York" {
+		t.Errorf("schedule-only apply clobbered the timezone: %v", j)
+	}
 	if jobHeaderValue(j, "Authorization") != "Bearer acc-secret" {
 		t.Errorf("apply clobbered the preserved header: %v", j["configuration"])
+	}
+
+	// apply (timezone) — change only the timezone; schedule and header survive.
+	mustRun(t, "job", "apply", id, "--timezone", "Europe/London")
+	out = mustRun(t, "job", "get", id, "-o", "json")
+	_ = json.Unmarshal([]byte(out), &j)
+	if j["timezone"] != "Europe/London" {
+		t.Errorf("apply did not update timezone: %v", j)
+	}
+	if j["schedule"] != "*/30 * * * *" {
+		t.Errorf("timezone-only apply clobbered the schedule: %v", j)
 	}
 
 	// apply (drift reconcile) — rotate the header value; nothing else.

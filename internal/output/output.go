@@ -707,9 +707,12 @@ type JobAttr struct {
 	// Kind is read-only: "recurring" for a cron schedule, "one_off" for a
 	// datetime / "now" schedule, "manual" for no schedule. Nil for an unsaved
 	// job.
-	Kind              *smplkit.JobKind      `json:"kind,omitempty" yaml:"kind,omitempty"`
-	Type              string                `json:"type,omitempty" yaml:"type,omitempty"`
-	Schedule          string                `json:"schedule" yaml:"schedule"`
+	Kind     *smplkit.JobKind `json:"kind,omitempty" yaml:"kind,omitempty"`
+	Type     string           `json:"type,omitempty" yaml:"type,omitempty"`
+	Schedule string           `json:"schedule" yaml:"schedule"`
+	// Timezone is the IANA zone the cron schedule is evaluated in (recurring
+	// jobs only). Empty means the server default of UTC.
+	Timezone          string                `json:"timezone,omitempty" yaml:"timezone,omitempty"`
 	ConcurrencyPolicy string                `json:"concurrency_policy,omitempty" yaml:"concurrency_policy,omitempty"`
 	Environments      map[string]JobEnvAttr `json:"environments,omitempty" yaml:"environments,omitempty"`
 	Configuration     JobHTTPConfigAttr     `json:"configuration" yaml:"configuration"`
@@ -728,6 +731,10 @@ type JobEnvAttr struct {
 	// cadence for this environment only (recurring jobs). Empty inherits the
 	// job's base schedule. Settable and round-trips through apply -f.
 	Schedule string `json:"schedule,omitempty" yaml:"schedule,omitempty"`
+	// Timezone is an optional per-environment IANA timezone override (recurring
+	// jobs only). Empty inherits the job's base timezone. Settable and
+	// round-trips through apply -f.
+	Timezone string `json:"timezone,omitempty" yaml:"timezone,omitempty"`
 	// NextRunAt is the read-only next scheduled fire time in this environment.
 	// Nil when the environment is not enabled, or once a one-off run has fired.
 	NextRunAt     *time.Time         `json:"next_run_at,omitempty" yaml:"next_run_at,omitempty"`
@@ -780,6 +787,7 @@ func JobToAttr(j *smplkit.Job) JobAttr {
 		Kind:              j.Kind,
 		Type:              j.Type,
 		Schedule:          j.Schedule,
+		Timezone:          j.Timezone,
 		ConcurrencyPolicy: j.ConcurrencyPolicy,
 		Configuration:     jobHTTPConfigToAttr(j.Configuration),
 		CreatedAt:         j.CreatedAt,
@@ -792,6 +800,7 @@ func JobToAttr(j *smplkit.Job) JobAttr {
 			ea := JobEnvAttr{
 				Enabled:   e.Enabled,
 				Schedule:  e.Schedule,
+				Timezone:  e.Timezone,
 				NextRunAt: e.NextRunAt,
 			}
 			if e.Configuration != nil {
@@ -839,14 +848,19 @@ func (r Renderer) RenderJobs(js []*smplkit.Job) error {
 
 func (r Renderer) renderJobTable(js []*smplkit.Job) error {
 	tw := newTabWriter(r.Out)
-	fmt.Fprintln(tw, "ID\tNAME\tSCHEDULE\tENABLED ENVS\tMETHOD\tURL")
+	fmt.Fprintln(tw, "ID\tNAME\tSCHEDULE\tTIMEZONE\tENABLED ENVS\tMETHOD\tURL")
 	for _, j := range js {
 		method := string(j.Configuration.Method)
 		if method == "" {
 			method = "POST"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			j.ID, j.Name, j.Schedule, strings.Join(enabledJobEnvKeys(j.Environments), ","),
+		timezone := j.Timezone
+		if timezone == "" {
+			timezone = "UTC"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			j.ID, j.Name, j.Schedule, timezone,
+			strings.Join(enabledJobEnvKeys(j.Environments), ","),
 			method, j.Configuration.URL)
 	}
 	return tw.Flush()

@@ -30,6 +30,7 @@ type jobFileShape struct {
 	Name              string                     `json:"name,omitempty"`
 	Description       *string                    `json:"description,omitempty"`
 	Schedule          string                     `json:"schedule,omitempty"`
+	Timezone          string                     `json:"timezone,omitempty"`
 	ConcurrencyPolicy string                     `json:"concurrency_policy,omitempty"`
 	Environments      map[string]jobEnvFileShape `json:"environments,omitempty"`
 	Configuration     *output.JobHTTPConfigAttr  `json:"configuration,omitempty"`
@@ -43,7 +44,10 @@ type jobEnvFileShape struct {
 	Enabled bool `json:"enabled"`
 	// Schedule is an optional per-environment cron override (recurring jobs
 	// only); empty inherits the job's base schedule.
-	Schedule      string                    `json:"schedule,omitempty"`
+	Schedule string `json:"schedule,omitempty"`
+	// Timezone is an optional per-environment IANA timezone override (recurring
+	// jobs only); empty inherits the job's base timezone.
+	Timezone      string                    `json:"timezone,omitempty"`
 	Configuration *output.JobHTTPConfigAttr `json:"configuration,omitempty"`
 }
 
@@ -469,6 +473,7 @@ func jobRunsRerunCmd() *cobra.Command {
 type jobInputs struct {
 	name     string
 	schedule string
+	timezone string
 	url      string
 	method   string
 	body     string
@@ -484,6 +489,7 @@ type jobInputs struct {
 
 	nameSet     bool
 	scheduleSet bool
+	timezoneSet bool
 	urlSet      bool
 	methodSet   bool
 	bodySet     bool
@@ -494,6 +500,7 @@ type jobInputs struct {
 func addJobScalarFlags(cmd *cobra.Command, in *jobInputs) {
 	cmd.Flags().StringVar(&in.name, "name", "", "display name (defaults to the id)")
 	cmd.Flags().StringVar(&in.schedule, "schedule", "", "5-field UTC cron, an ISO-8601 datetime, or \"now\"")
+	cmd.Flags().StringVar(&in.timezone, "timezone", "", "IANA timezone the cron is evaluated in (recurring jobs only); empty = UTC")
 	cmd.Flags().StringVar(&in.url, "url", "", "absolute http(s) URL the job calls when it fires")
 	cmd.Flags().StringVar(&in.method, "method", "POST", "HTTP method: GET|POST|PUT|PATCH|DELETE")
 	cmd.Flags().StringArrayVar(&in.headers, "header", nil, "HTTP header (repeatable): --header \"Name: Value\" (replaces the full header set)")
@@ -509,6 +516,7 @@ func addJobScalarFlags(cmd *cobra.Command, in *jobInputs) {
 func (in *jobInputs) readChanged(cmd *cobra.Command) {
 	in.nameSet = cmd.Flags().Changed("name")
 	in.scheduleSet = cmd.Flags().Changed("schedule")
+	in.timezoneSet = cmd.Flags().Changed("timezone")
 	in.urlSet = cmd.Flags().Changed("url")
 	in.methodSet = cmd.Flags().Changed("method")
 	in.bodySet = cmd.Flags().Changed("body")
@@ -536,6 +544,14 @@ func buildJobForCreate(ns *smplkit.JobsClient, id string, shape *jobFileShape, i
 		effSchedule = shape.Schedule
 	}
 
+	effTimezone := ""
+	switch {
+	case in.timezoneSet:
+		effTimezone = in.timezone
+	case shape != nil && shape.Timezone != "":
+		effTimezone = shape.Timezone
+	}
+
 	cfg, err := buildJobHTTPConfig(shape, in)
 	if err != nil {
 		return nil, err
@@ -561,7 +577,11 @@ func buildJobForCreate(ns *smplkit.JobsClient, id string, shape *jobFileShape, i
 		}
 	}
 
-	return newJobForSchedule(ns, id, effName, effSchedule, cfg, opts...), nil
+	job := newJobForSchedule(ns, id, effName, effSchedule, cfg, opts...)
+	if effTimezone != "" {
+		job.SetTimezone(effTimezone)
+	}
+	return job, nil
 }
 
 // newJobForSchedule classifies effSchedule and picks the matching SDK
@@ -616,6 +636,7 @@ func jobEnvFileToModel(envs map[string]jobEnvFileShape) map[string]smplkit.JobEn
 		out[k] = smplkit.JobEnvironment{
 			Enabled:       e.Enabled,
 			Schedule:      e.Schedule,
+			Timezone:      e.Timezone,
 			Configuration: jobEnvShapeToConfig(e.Configuration),
 		}
 	}
@@ -745,6 +766,9 @@ func applyJobInputsToModel(job *smplkit.Job, shape *jobFileShape, in jobInputs) 
 	if in.scheduleSet {
 		job.Schedule = in.schedule
 	}
+	if in.timezoneSet {
+		job.Timezone = in.timezone
+	}
 	if in.urlSet {
 		job.Configuration.URL = in.url
 	}
@@ -783,6 +807,9 @@ func applyJobFileToModel(job *smplkit.Job, shape *jobFileShape) {
 	}
 	if shape.Schedule != "" {
 		job.Schedule = shape.Schedule
+	}
+	if shape.Timezone != "" {
+		job.Timezone = shape.Timezone
 	}
 	if shape.ConcurrencyPolicy != "" {
 		job.ConcurrencyPolicy = shape.ConcurrencyPolicy

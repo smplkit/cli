@@ -215,9 +215,10 @@ func TestRenderer_Job_JSON(t *testing.T) {
 		Enabled:           true,
 		Type:              "http",
 		Schedule:          "0 3 * * *",
+		Timezone:          "America/New_York",
 		ConcurrencyPolicy: "ALLOW",
 		Environments: map[string]smplkit.JobEnvironment{
-			"production": {Enabled: true, NextRunAt: &next},
+			"production": {Enabled: true, Timezone: "Europe/London", NextRunAt: &next},
 		},
 		Configuration: smplkit.HttpConfig{
 			URL:    "https://admin.example.com/execute",
@@ -240,6 +241,9 @@ func TestRenderer_Job_JSON(t *testing.T) {
 	if got.ID != "housekeeping" || got.Schedule != "0 3 * * *" {
 		t.Errorf("got %+v", got)
 	}
+	if got.Timezone != "America/New_York" {
+		t.Errorf("base timezone not projected: %q", got.Timezone)
+	}
 	if got.Configuration.Method != "POST" || got.Configuration.URL != "https://admin.example.com/execute" {
 		t.Errorf("config: %+v", got.Configuration)
 	}
@@ -255,6 +259,9 @@ func TestRenderer_Job_JSON(t *testing.T) {
 	prod, ok := got.Environments["production"]
 	if !ok || prod.NextRunAt == nil || !prod.NextRunAt.Equal(next) {
 		t.Errorf("per-env next_run_at not projected: %+v", got.Environments)
+	}
+	if prod.Timezone != "Europe/London" {
+		t.Errorf("per-env timezone not projected: %q", prod.Timezone)
 	}
 }
 
@@ -276,6 +283,7 @@ func TestRenderer_Jobs_Table(t *testing.T) {
 			ID:       "a",
 			Name:     "A",
 			Schedule: "0 0 * * *",
+			Timezone: "America/New_York",
 			Enabled:  true,
 			Configuration: smplkit.HttpConfig{
 				URL:    "https://a.test",
@@ -301,6 +309,17 @@ func TestRenderer_Jobs_Table(t *testing.T) {
 	}
 	if !strings.Contains(out, "SCHEDULE") || !strings.Contains(out, "ENABLED ENVS") {
 		t.Errorf("missing headers: %q", out)
+	}
+	if !strings.Contains(out, "TIMEZONE") {
+		t.Errorf("missing TIMEZONE header: %q", out)
+	}
+	// Job a carries an explicit timezone; job b has none and renders the UTC
+	// default.
+	if !strings.Contains(out, "America/New_York") {
+		t.Errorf("explicit timezone should render in the table: %q", out)
+	}
+	if !strings.Contains(out, "UTC") {
+		t.Errorf("empty timezone should render as UTC in the table: %q", out)
 	}
 	// Next-fire is per-environment now and no longer a flat-table column.
 	if strings.Contains(out, "NEXT RUN") {

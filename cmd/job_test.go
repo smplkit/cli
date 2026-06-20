@@ -682,6 +682,104 @@ func TestApplyJobFileToModel_FullReplacesEnvironments(t *testing.T) {
 	}
 }
 
+// TestBuildJobForCreate_TimezoneFromFlag verifies the --timezone flag lands
+// on the base job when supplied, mirroring --schedule.
+func TestBuildJobForCreate_TimezoneFromFlag(t *testing.T) {
+	ns := testJobsClient(t)
+	job, err := buildJobForCreate(ns, "j", nil, jobInputs{
+		schedule:    "0 0 * * *",
+		scheduleSet: true,
+		timezone:    "America/New_York",
+		timezoneSet: true,
+		url:         "https://x.test",
+		urlSet:      true,
+	})
+	if err != nil {
+		t.Fatalf("buildJobForCreate: %v", err)
+	}
+	if job.Timezone != "America/New_York" {
+		t.Errorf("timezone from flag: %q", job.Timezone)
+	}
+}
+
+// TestBuildJobForCreate_TimezoneFromFile verifies the base timezone falls back
+// to the -f file when the flag is absent (flag wins, else file).
+func TestBuildJobForCreate_TimezoneFromFile(t *testing.T) {
+	ns := testJobsClient(t)
+	shape := &jobFileShape{
+		Schedule:      "0 4 * * *",
+		Timezone:      "Europe/London",
+		Configuration: &output.JobHTTPConfigAttr{URL: "https://file.test"},
+	}
+	job, err := buildJobForCreate(ns, "j", shape, jobInputs{})
+	if err != nil {
+		t.Fatalf("buildJobForCreate: %v", err)
+	}
+	if job.Timezone != "Europe/London" {
+		t.Errorf("timezone should fall back to the file: %q", job.Timezone)
+	}
+}
+
+// TestJobEnvFileToModel_CarriesTimezone verifies the per-environment timezone
+// override round-trips from the file shape onto each environment, mirroring the
+// per-env schedule.
+func TestJobEnvFileToModel_CarriesTimezone(t *testing.T) {
+	envs := jobEnvFileToModel(map[string]jobEnvFileShape{
+		"production": {Enabled: true, Schedule: "0 1 * * *", Timezone: "Asia/Tokyo"},
+	})
+	if got := envs["production"].Timezone; got != "Asia/Tokyo" {
+		t.Errorf("per-env timezone should carry through: %q", got)
+	}
+	if got := envs["production"].Schedule; got != "0 1 * * *" {
+		t.Errorf("per-env schedule should carry through: %q", got)
+	}
+}
+
+// TestApplyJobInputsToModel_TimezoneScalar verifies --timezone updates the base
+// timezone on the apply (read-modify-write) path and leaves it untouched when
+// unset.
+func TestApplyJobInputsToModel_TimezoneScalar(t *testing.T) {
+	existing := &smplkit.Job{
+		ID:            "j",
+		Schedule:      "0 0 * * *",
+		Timezone:      "UTC",
+		Configuration: smplkit.HttpConfig{URL: "https://orig.test"},
+	}
+	// Changing only the timezone leaves the schedule intact.
+	in := jobInputs{timezone: "America/Chicago", timezoneSet: true}
+	if err := applyJobInputsToModel(existing, nil, in); err != nil {
+		t.Fatalf("applyJobInputsToModel: %v", err)
+	}
+	if existing.Timezone != "America/Chicago" {
+		t.Errorf("timezone not updated: %q", existing.Timezone)
+	}
+	if existing.Schedule != "0 0 * * *" {
+		t.Errorf("schedule should be preserved on a timezone-only apply: %q", existing.Schedule)
+	}
+
+	// A second apply with no timezone flag must leave the timezone untouched.
+	if err := applyJobInputsToModel(existing, nil, jobInputs{name: "X", nameSet: true}); err != nil {
+		t.Fatalf("applyJobInputsToModel: %v", err)
+	}
+	if existing.Timezone != "America/Chicago" {
+		t.Errorf("timezone should survive an apply that does not set it: %q", existing.Timezone)
+	}
+}
+
+// TestApplyJobFileToModel_Timezone verifies a -f file's base timezone is
+// applied when set.
+func TestApplyJobFileToModel_Timezone(t *testing.T) {
+	existing := &smplkit.Job{
+		ID:            "j",
+		Schedule:      "0 0 * * *",
+		Configuration: smplkit.HttpConfig{URL: "https://orig.test"},
+	}
+	applyJobFileToModel(existing, &jobFileShape{Timezone: "Australia/Sydney"})
+	if existing.Timezone != "Australia/Sydney" {
+		t.Errorf("timezone from file: %q", existing.Timezone)
+	}
+}
+
 // testJobsClient builds a JobsClient for the pure builder helpers. The SDK
 // does no I/O at construction, so a dummy API key is enough; ns.New only
 // assembles an in-memory *Job.
