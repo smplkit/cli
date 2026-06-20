@@ -3,7 +3,7 @@ module github.com/smplkit/cli
 go 1.24.3
 
 require (
-	github.com/smplkit/go-sdk/v3 v3.0.148
+	github.com/smplkit/go-sdk/v3 v3.0.153
 	github.com/spf13/cobra v1.10.2
 	gopkg.in/yaml.v3 v3.0.1
 )

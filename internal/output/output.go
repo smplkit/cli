@@ -712,7 +712,11 @@ type JobAttr struct {
 	Schedule string           `json:"schedule" yaml:"schedule"`
 	// Timezone is the IANA zone the cron schedule is evaluated in (recurring
 	// jobs only). Empty means the server default of UTC.
-	Timezone          string                `json:"timezone,omitempty" yaml:"timezone,omitempty"`
+	Timezone string `json:"timezone,omitempty" yaml:"timezone,omitempty"`
+	// RetryPolicy is the base retry-policy id for failed runs (overridable per
+	// environment). Empty means the built-in "Default" policy, which never
+	// retries.
+	RetryPolicy       string                `json:"retry_policy,omitempty" yaml:"retry_policy,omitempty"`
 	ConcurrencyPolicy string                `json:"concurrency_policy,omitempty" yaml:"concurrency_policy,omitempty"`
 	Environments      map[string]JobEnvAttr `json:"environments,omitempty" yaml:"environments,omitempty"`
 	Configuration     JobHTTPConfigAttr     `json:"configuration" yaml:"configuration"`
@@ -735,6 +739,10 @@ type JobEnvAttr struct {
 	// jobs only). Empty inherits the job's base timezone. Settable and
 	// round-trips through apply -f.
 	Timezone string `json:"timezone,omitempty" yaml:"timezone,omitempty"`
+	// RetryPolicy is an optional per-environment retry-policy override (a policy
+	// id, or "Default"). Empty inherits the job's base retry policy. Settable and
+	// round-trips through apply -f.
+	RetryPolicy string `json:"retry_policy,omitempty" yaml:"retry_policy,omitempty"`
 	// NextRunAt is the read-only next scheduled fire time in this environment.
 	// Nil when the environment is not enabled, or once a one-off run has fired.
 	NextRunAt     *time.Time         `json:"next_run_at,omitempty" yaml:"next_run_at,omitempty"`
@@ -788,6 +796,7 @@ func JobToAttr(j *smplkit.Job) JobAttr {
 		Type:              j.Type,
 		Schedule:          j.Schedule,
 		Timezone:          j.Timezone,
+		RetryPolicy:       j.RetryPolicy,
 		ConcurrencyPolicy: j.ConcurrencyPolicy,
 		Configuration:     jobHTTPConfigToAttr(j.Configuration),
 		CreatedAt:         j.CreatedAt,
@@ -798,10 +807,11 @@ func JobToAttr(j *smplkit.Job) JobAttr {
 		envs := make(map[string]JobEnvAttr, len(j.Environments))
 		for k, e := range j.Environments {
 			ea := JobEnvAttr{
-				Enabled:   e.Enabled,
-				Schedule:  e.Schedule,
-				Timezone:  e.Timezone,
-				NextRunAt: e.NextRunAt,
+				Enabled:     e.Enabled,
+				Schedule:    e.Schedule,
+				Timezone:    e.Timezone,
+				RetryPolicy: e.RetryPolicy,
+				NextRunAt:   e.NextRunAt,
 			}
 			if e.Configuration != nil {
 				c := jobHTTPConfigToAttr(*e.Configuration)
@@ -882,6 +892,93 @@ func enabledJobEnvKeys(m map[string]smplkit.JobEnvironment) []string {
 	return out
 }
 
+// ── Retry Policy ─────────────────────────────────────────────────────
+
+// RetryPolicyAttr is the JSON/YAML shape the CLI exposes for a retry policy —
+// the SDK model's user-facing fields, no JSON:API envelope, no client back-
+// reference. A `get -o json` snapshot replayed through `apply -f` round-trips.
+type RetryPolicyAttr struct {
+	ID           string          `json:"id" yaml:"id"`
+	Name         string          `json:"name" yaml:"name"`
+	MaxRetries   int             `json:"max_retries" yaml:"max_retries"`
+	Backoff      smplkit.Backoff `json:"backoff" yaml:"backoff"`
+	DelaySeconds int             `json:"delay_seconds" yaml:"delay_seconds"`
+	// MaxDelaySeconds caps the wait between retries (exponential backoff only).
+	// Omitted when nil (uncapped).
+	MaxDelaySeconds *int        `json:"max_delay_seconds,omitempty" yaml:"max_delay_seconds,omitempty"`
+	RetryOn         RetryOnAttr `json:"retry_on" yaml:"retry_on"`
+	CreatedAt       *time.Time  `json:"created_at,omitempty" yaml:"created_at,omitempty"`
+	UpdatedAt       *time.Time  `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
+	Version         *int        `json:"version,omitempty" yaml:"version,omitempty"`
+}
+
+// RetryOnAttr is the JSON/YAML shape for which failures a policy retries.
+type RetryOnAttr struct {
+	Statuses []int                 `json:"statuses,omitempty" yaml:"statuses,omitempty"`
+	Reasons  []smplkit.RetryReason `json:"reasons,omitempty" yaml:"reasons,omitempty"`
+}
+
+// RetryPolicyToAttr projects a smplkit.RetryPolicy onto its attribute shape.
+func RetryPolicyToAttr(p *smplkit.RetryPolicy) RetryPolicyAttr {
+	return RetryPolicyAttr{
+		ID:              p.ID,
+		Name:            p.Name,
+		MaxRetries:      p.MaxRetries,
+		Backoff:         p.Backoff,
+		DelaySeconds:    p.DelaySeconds,
+		MaxDelaySeconds: p.MaxDelaySeconds,
+		RetryOn: RetryOnAttr{
+			Statuses: p.RetryOn.Statuses,
+			Reasons:  p.RetryOn.Reasons,
+		},
+		CreatedAt: p.CreatedAt,
+		UpdatedAt: p.UpdatedAt,
+		Version:   p.Version,
+	}
+}
+
+// RenderRetryPolicy writes a single retry policy.
+func (r Renderer) RenderRetryPolicy(p *smplkit.RetryPolicy) error {
+	if r.Quiet {
+		return r.renderIdentifiers([]string{p.ID})
+	}
+	if done, err := r.renderJSONOrYAML(RetryPolicyToAttr(p)); done {
+		return err
+	}
+	return r.renderRetryPolicyTable([]*smplkit.RetryPolicy{p})
+}
+
+// RenderRetryPolicies writes a list of retry policies.
+func (r Renderer) RenderRetryPolicies(ps []*smplkit.RetryPolicy) error {
+	if r.Quiet {
+		ids := make([]string, 0, len(ps))
+		for _, p := range ps {
+			ids = append(ids, p.ID)
+		}
+		return r.renderIdentifiers(ids)
+	}
+	if r.Format != cliconfig.OutputTable {
+		attrs := make([]RetryPolicyAttr, 0, len(ps))
+		for _, p := range ps {
+			attrs = append(attrs, RetryPolicyToAttr(p))
+		}
+		if done, err := r.renderJSONOrYAML(attrs); done {
+			return err
+		}
+	}
+	return r.renderRetryPolicyTable(ps)
+}
+
+func (r Renderer) renderRetryPolicyTable(ps []*smplkit.RetryPolicy) error {
+	tw := newTabWriter(r.Out)
+	fmt.Fprintln(tw, "ID\tNAME\tBACKOFF\tMAX RETRIES\tDELAY")
+	for _, p := range ps {
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%d\n",
+			p.ID, p.Name, string(p.Backoff), p.MaxRetries, p.DelaySeconds)
+	}
+	return tw.Flush()
+}
+
 // ── Run ──────────────────────────────────────────────────────────────
 
 // RunAttr is the JSON/YAML shape for a single job run (read-only). It is a
@@ -894,9 +991,14 @@ type RunAttr struct {
 	// Environment is the environment this run executed in. A scheduled run
 	// inherits the firing job-environment; a manual run uses the environment
 	// it was triggered in; a rerun copies its source run's environment.
-	Environment       string                 `json:"environment" yaml:"environment"`
-	Trigger           string                 `json:"trigger" yaml:"trigger"`
-	RerunOf           *string                `json:"rerun_of,omitempty" yaml:"rerun_of,omitempty"`
+	Environment string  `json:"environment" yaml:"environment"`
+	Trigger     string  `json:"trigger" yaml:"trigger"`
+	RerunOf     *string `json:"rerun_of,omitempty" yaml:"rerun_of,omitempty"`
+	// RetryOf is the id of the chain's original run, and RetryAttempt is which
+	// retry this run is (1 for the first). Both set only for a RETRY run
+	// (Trigger=="RETRY"), nil otherwise.
+	RetryOf           *string                `json:"retry_of,omitempty" yaml:"retry_of,omitempty"`
+	RetryAttempt      *int                   `json:"retry_attempt,omitempty" yaml:"retry_attempt,omitempty"`
 	Status            string                 `json:"status" yaml:"status"`
 	ScheduledFor      *time.Time             `json:"scheduled_for,omitempty" yaml:"scheduled_for,omitempty"`
 	StartedAt         *time.Time             `json:"started_at,omitempty" yaml:"started_at,omitempty"`
@@ -913,7 +1015,7 @@ type RunAttr struct {
 
 // RunToAttr projects a smplkit.Run onto its attribute shape.
 func RunToAttr(run *smplkit.Run) RunAttr {
-	return RunAttr{
+	a := RunAttr{
 		ID:                run.ID,
 		Job:               run.Job,
 		JobVersion:        run.JobVersion,
@@ -933,6 +1035,15 @@ func RunToAttr(run *smplkit.Run) RunAttr {
 		Result:            run.Result,
 		CreatedAt:         run.CreatedAt,
 	}
+	// Retry is non-nil only for a RETRY run; surface the chain's original run
+	// id and this run's attempt number when present.
+	if run.Retry != nil {
+		of := run.Retry.Of
+		attempt := run.Retry.Attempt
+		a.RetryOf = &of
+		a.RetryAttempt = &attempt
+	}
+	return a
 }
 
 // RenderRun writes a single run.

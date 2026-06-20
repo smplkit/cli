@@ -354,6 +354,138 @@ func TestRenderer_Jobs_JSONList(t *testing.T) {
 	}
 }
 
+func TestRenderer_Job_JSON_RetryPolicy(t *testing.T) {
+	j := &smplkit.Job{
+		ID:          "housekeeping",
+		Name:        "Housekeeping",
+		Schedule:    "0 3 * * *",
+		RetryPolicy: "aggressive",
+		Environments: map[string]smplkit.JobEnvironment{
+			"production": {Enabled: true, RetryPolicy: "prod-policy"},
+		},
+		Configuration: smplkit.HttpConfig{URL: "https://x.test", Method: smplkit.JobHttpMethodPost},
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputJSON, false)
+	if err := r.RenderJob(j); err != nil {
+		t.Fatalf("RenderJob: %v", err)
+	}
+	var got JobAttr
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.RetryPolicy != "aggressive" {
+		t.Errorf("base retry_policy not projected: %q", got.RetryPolicy)
+	}
+	prod, ok := got.Environments["production"]
+	if !ok || prod.RetryPolicy != "prod-policy" {
+		t.Errorf("per-env retry_policy not projected: %+v", got.Environments)
+	}
+}
+
+func TestRenderer_RetryPolicy_JSON(t *testing.T) {
+	mds := 60
+	created := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
+	p := &smplkit.RetryPolicy{
+		ID:              "aggressive",
+		Name:            "Aggressive",
+		MaxRetries:      5,
+		Backoff:         smplkit.BackoffExponential,
+		DelaySeconds:    2,
+		MaxDelaySeconds: &mds,
+		RetryOn: smplkit.RetryOn{
+			Statuses: []int{429, 503},
+			Reasons:  []smplkit.RetryReason{smplkit.RetryReasonTimeout},
+		},
+		CreatedAt: &created,
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputJSON, false)
+	if err := r.RenderRetryPolicy(p); err != nil {
+		t.Fatalf("RenderRetryPolicy: %v", err)
+	}
+	var got RetryPolicyAttr
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.ID != "aggressive" || got.Backoff != smplkit.BackoffExponential || got.MaxRetries != 5 || got.DelaySeconds != 2 {
+		t.Errorf("got %+v", got)
+	}
+	if got.MaxDelaySeconds == nil || *got.MaxDelaySeconds != 60 {
+		t.Errorf("max_delay_seconds not projected: %v", got.MaxDelaySeconds)
+	}
+	if len(got.RetryOn.Statuses) != 2 || got.RetryOn.Statuses[0] != 429 {
+		t.Errorf("retry_on.statuses: %#v", got.RetryOn.Statuses)
+	}
+	if len(got.RetryOn.Reasons) != 1 || got.RetryOn.Reasons[0] != smplkit.RetryReasonTimeout {
+		t.Errorf("retry_on.reasons: %#v", got.RetryOn.Reasons)
+	}
+}
+
+func TestRenderer_RetryPolicy_JSON_OmitsMaxDelayWhenNil(t *testing.T) {
+	p := &smplkit.RetryPolicy{ID: "p", Name: "P", Backoff: smplkit.BackoffFixed, MaxRetries: 1, DelaySeconds: 3}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputJSON, false)
+	if err := r.RenderRetryPolicy(p); err != nil {
+		t.Fatalf("RenderRetryPolicy: %v", err)
+	}
+	if strings.Contains(buf.String(), "max_delay_seconds") {
+		t.Errorf("nil max_delay_seconds should be omitted: %q", buf.String())
+	}
+}
+
+func TestRenderer_RetryPolicy_Quiet(t *testing.T) {
+	p := &smplkit.RetryPolicy{ID: "p1"}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputTable, true)
+	if err := r.RenderRetryPolicy(p); err != nil {
+		t.Fatalf("RenderRetryPolicy: %v", err)
+	}
+	if got := strings.TrimSpace(buf.String()); got != "p1" {
+		t.Errorf("quiet: got %q", got)
+	}
+}
+
+func TestRenderer_RetryPolicies_Table(t *testing.T) {
+	policies := []*smplkit.RetryPolicy{
+		{ID: "a", Name: "A", Backoff: smplkit.BackoffExponential, MaxRetries: 3, DelaySeconds: 5},
+		{ID: "b", Name: "B", Backoff: smplkit.BackoffFixed, MaxRetries: 1, DelaySeconds: 10},
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputTable, false)
+	if err := r.RenderRetryPolicies(policies); err != nil {
+		t.Fatalf("RenderRetryPolicies: %v", err)
+	}
+	out := buf.String()
+	if !strings.HasPrefix(out, "ID") {
+		t.Errorf("expected header, got %q", out)
+	}
+	for _, want := range []string{"BACKOFF", "MAX RETRIES", "DELAY", "exponential", "fixed", "a", "b"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("table missing %q: %q", want, out)
+		}
+	}
+}
+
+func TestRenderer_RetryPolicies_JSONList(t *testing.T) {
+	policies := []*smplkit.RetryPolicy{
+		{ID: "a", Name: "A", Backoff: smplkit.BackoffExponential, MaxRetries: 3, DelaySeconds: 5},
+		{ID: "b", Name: "B", Backoff: smplkit.BackoffFixed, MaxRetries: 1, DelaySeconds: 10},
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputJSON, false)
+	if err := r.RenderRetryPolicies(policies); err != nil {
+		t.Fatalf("RenderRetryPolicies: %v", err)
+	}
+	var got []RetryPolicyAttr
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v\n%s", err, buf.String())
+	}
+	if len(got) != 2 || got[0].ID != "a" || got[1].Backoff != smplkit.BackoffFixed {
+		t.Errorf("list projection: %+v", got)
+	}
+}
+
 func TestRenderer_Run_JSON(t *testing.T) {
 	started := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 	run := &smplkit.Run{
@@ -374,6 +506,64 @@ func TestRenderer_Run_JSON(t *testing.T) {
 	}
 	if got.ID != "run-1" || got.Job != "housekeeping" || got.Status != "SUCCEEDED" {
 		t.Errorf("got %+v", got)
+	}
+}
+
+func TestRunToAttr_SurfacesRetry(t *testing.T) {
+	// A RETRY run carries a Retry chain position; RunToAttr surfaces it as
+	// retry_of + retry_attempt. A non-RETRY run leaves both nil.
+	retry := &smplkit.Run{
+		ID:      "run-2",
+		Job:     "j",
+		Trigger: string(smplkit.RunTriggerRetry),
+		Status:  "PENDING",
+		Retry:   &smplkit.RunRetry{Of: "run-1", Attempt: 2},
+	}
+	got := RunToAttr(retry)
+	if got.Trigger != "RETRY" {
+		t.Errorf("trigger should flow through as the raw string: %q", got.Trigger)
+	}
+	if got.RetryOf == nil || *got.RetryOf != "run-1" {
+		t.Errorf("retry_of not surfaced: %v", got.RetryOf)
+	}
+	if got.RetryAttempt == nil || *got.RetryAttempt != 2 {
+		t.Errorf("retry_attempt not surfaced: %v", got.RetryAttempt)
+	}
+
+	plain := RunToAttr(&smplkit.Run{ID: "run-3", Job: "j", Trigger: "SCHEDULE", Status: "SUCCEEDED"})
+	if plain.RetryOf != nil || plain.RetryAttempt != nil {
+		t.Errorf("non-RETRY run should leave retry fields nil: %v %v", plain.RetryOf, plain.RetryAttempt)
+	}
+}
+
+func TestRenderer_Run_JSON_RetryFields(t *testing.T) {
+	run := &smplkit.Run{
+		ID:      "run-2",
+		Job:     "j",
+		Trigger: "RETRY",
+		Status:  "FAILED",
+		Retry:   &smplkit.RunRetry{Of: "run-1", Attempt: 1},
+	}
+	var buf bytes.Buffer
+	r := NewRenderer(&buf, cliconfig.OutputJSON, false)
+	if err := r.RenderRun(run); err != nil {
+		t.Fatalf("RenderRun: %v", err)
+	}
+	var got RunAttr
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.RetryOf == nil || *got.RetryOf != "run-1" || got.RetryAttempt == nil || *got.RetryAttempt != 1 {
+		t.Errorf("retry fields not projected: %+v", got)
+	}
+	// A non-RETRY run omits the retry keys entirely.
+	var plainBuf bytes.Buffer
+	pr := NewRenderer(&plainBuf, cliconfig.OutputJSON, false)
+	if err := pr.RenderRun(&smplkit.Run{ID: "run-4", Job: "j", Trigger: "SCHEDULE", Status: "SUCCEEDED"}); err != nil {
+		t.Fatalf("RenderRun: %v", err)
+	}
+	if strings.Contains(plainBuf.String(), "retry_of") || strings.Contains(plainBuf.String(), "retry_attempt") {
+		t.Errorf("non-RETRY run should omit retry keys: %q", plainBuf.String())
 	}
 }
 

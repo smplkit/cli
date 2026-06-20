@@ -31,6 +31,7 @@ type jobFileShape struct {
 	Description       *string                    `json:"description,omitempty"`
 	Schedule          string                     `json:"schedule,omitempty"`
 	Timezone          string                     `json:"timezone,omitempty"`
+	RetryPolicy       string                     `json:"retry_policy,omitempty"`
 	ConcurrencyPolicy string                     `json:"concurrency_policy,omitempty"`
 	Environments      map[string]jobEnvFileShape `json:"environments,omitempty"`
 	Configuration     *output.JobHTTPConfigAttr  `json:"configuration,omitempty"`
@@ -47,7 +48,10 @@ type jobEnvFileShape struct {
 	Schedule string `json:"schedule,omitempty"`
 	// Timezone is an optional per-environment IANA timezone override (recurring
 	// jobs only); empty inherits the job's base timezone.
-	Timezone      string                    `json:"timezone,omitempty"`
+	Timezone string `json:"timezone,omitempty"`
+	// RetryPolicy is an optional per-environment retry-policy override (a policy
+	// id, or "Default"); empty inherits the job's base retry policy.
+	RetryPolicy   string                    `json:"retry_policy,omitempty"`
 	Configuration *output.JobHTTPConfigAttr `json:"configuration,omitempty"`
 }
 
@@ -370,31 +374,43 @@ func jobUsageCmd() *cobra.Command {
 // forward manually.
 func jobRunsListCmd() *cobra.Command {
 	var (
-		job   string
-		env   string
-		limit int
-		after string
+		job         string
+		env         string
+		limit       int
+		after       string
+		triggers    []string
+		lastRunOnly bool
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List job runs (newest first)",
 		Long: "List run history, newest first, across all jobs or scoped to one with\n" +
 			"--job. Restrict to a single environment with --env (omit to cover every\n" +
-			"environment you can access). Cursor paginated: pass --limit for the page\n" +
-			"size and --after with the last run id from the previous page to fetch the\n" +
-			"next page.",
+			"environment you can access). Restrict to runs with a given trigger via\n" +
+			"--trigger MANUAL|RERUN|RETRY|SCHEDULE (repeatable; any-of). Pass\n" +
+			"--last-run-only to collapse to the last completed run per job and\n" +
+			"environment (in-flight runs excluded). Cursor paginated: pass --limit for\n" +
+			"the page size and --after with the last run id from the previous page to\n" +
+			"fetch the next page.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			client, err := withClient()
-			if err != nil {
-				return err
-			}
-			input := smplkit.ListRunsInput{Job: job, After: after}
+			input := smplkit.ListRunsInput{Job: job, After: after, LastRunOnly: lastRunOnly}
 			if env != "" {
 				input.Environments = []string{env}
 			}
+			if len(triggers) > 0 {
+				parsed, err := parseRunTriggers(triggers)
+				if err != nil {
+					return err
+				}
+				input.Triggers = parsed
+			}
 			if limit > 0 {
 				input.PageSize = limit
+			}
+			client, err := withClient()
+			if err != nil {
+				return err
 			}
 			runs, err := client.Jobs().Runs().List(cliContext(cmd), input)
 			if err != nil {
@@ -405,9 +421,37 @@ func jobRunsListCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&job, "job", "", "scope to a single job's run history")
 	cmd.Flags().StringVar(&env, "env", "", "scope to runs stamped with this environment")
+	cmd.Flags().StringArrayVar(&triggers, "trigger", nil, "filter by trigger (repeatable): MANUAL|RERUN|RETRY|SCHEDULE")
+	cmd.Flags().BoolVar(&lastRunOnly, "last-run-only", false, "collapse to the last completed run per job and environment")
 	cmd.Flags().IntVar(&limit, "limit", 0, "page size (server default when unset)")
 	cmd.Flags().StringVar(&after, "after", "", "cursor: the last run id from the previous page")
 	return cmd
+}
+
+// parseRunTrigger normalizes and validates a single --trigger value.
+func parseRunTrigger(raw string) (smplkit.RunTrigger, error) {
+	switch t := smplkit.RunTrigger(strings.ToUpper(strings.TrimSpace(raw))); t {
+	case smplkit.RunTriggerManual,
+		smplkit.RunTriggerRerun,
+		smplkit.RunTriggerRetry,
+		smplkit.RunTriggerSchedule:
+		return t, nil
+	default:
+		return "", fmt.Errorf("invalid --trigger %q (expected MANUAL|RERUN|RETRY|SCHEDULE)", raw)
+	}
+}
+
+// parseRunTriggers validates a list of --trigger values into the SDK enum.
+func parseRunTriggers(raws []string) ([]smplkit.RunTrigger, error) {
+	out := make([]smplkit.RunTrigger, 0, len(raws))
+	for _, raw := range raws {
+		t, err := parseRunTrigger(raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, nil
 }
 
 func jobRunsGetCmd() *cobra.Command {
@@ -471,14 +515,15 @@ func jobRunsRerunCmd() *cobra.Command {
 // were explicitly set, so the apply (read-modify-write) path leaves
 // unspecified fields untouched and create can fall back to the -f file.
 type jobInputs struct {
-	name     string
-	schedule string
-	timezone string
-	url      string
-	method   string
-	body     string
-	headers  []string
-	file     string
+	name        string
+	schedule    string
+	timezone    string
+	retryPolicy string
+	url         string
+	method      string
+	body        string
+	headers     []string
+	file        string
 
 	// enableEnvs / disableEnvs turn the job on/off in named environments
 	// (the per-environment enablement that replaced the old base flag). env
@@ -487,20 +532,22 @@ type jobInputs struct {
 	disableEnvs []string
 	env         string
 
-	nameSet     bool
-	scheduleSet bool
-	timezoneSet bool
-	urlSet      bool
-	methodSet   bool
-	bodySet     bool
-	headerSet   bool
-	envSet      bool
+	nameSet        bool
+	scheduleSet    bool
+	timezoneSet    bool
+	retryPolicySet bool
+	urlSet         bool
+	methodSet      bool
+	bodySet        bool
+	headerSet      bool
+	envSet         bool
 }
 
 func addJobScalarFlags(cmd *cobra.Command, in *jobInputs) {
 	cmd.Flags().StringVar(&in.name, "name", "", "display name (defaults to the id)")
 	cmd.Flags().StringVar(&in.schedule, "schedule", "", "5-field UTC cron, an ISO-8601 datetime, or \"now\"")
 	cmd.Flags().StringVar(&in.timezone, "timezone", "", "IANA timezone the cron is evaluated in (recurring jobs only); empty = UTC")
+	cmd.Flags().StringVar(&in.retryPolicy, "retry-policy", "", "retry policy id for failed runs; empty uses the built-in Default")
 	cmd.Flags().StringVar(&in.url, "url", "", "absolute http(s) URL the job calls when it fires")
 	cmd.Flags().StringVar(&in.method, "method", "POST", "HTTP method: GET|POST|PUT|PATCH|DELETE")
 	cmd.Flags().StringArrayVar(&in.headers, "header", nil, "HTTP header (repeatable): --header \"Name: Value\" (replaces the full header set)")
@@ -517,6 +564,7 @@ func (in *jobInputs) readChanged(cmd *cobra.Command) {
 	in.nameSet = cmd.Flags().Changed("name")
 	in.scheduleSet = cmd.Flags().Changed("schedule")
 	in.timezoneSet = cmd.Flags().Changed("timezone")
+	in.retryPolicySet = cmd.Flags().Changed("retry-policy")
 	in.urlSet = cmd.Flags().Changed("url")
 	in.methodSet = cmd.Flags().Changed("method")
 	in.bodySet = cmd.Flags().Changed("body")
@@ -567,6 +615,13 @@ func buildJobForCreate(ns *smplkit.JobsClient, id string, shape *jobFileShape, i
 	}
 	if in.envSet {
 		opts = append(opts, smplkit.WithJobBirthEnvironment(in.env))
+	}
+	// Retry policy: the scalar flag wins, else fall back to the -f file's base.
+	switch {
+	case in.retryPolicySet:
+		opts = append(opts, smplkit.WithJobRetryPolicy(in.retryPolicy))
+	case shape != nil && shape.RetryPolicy != "":
+		opts = append(opts, smplkit.WithJobRetryPolicy(shape.RetryPolicy))
 	}
 	if shape != nil {
 		if shape.Description != nil {
@@ -637,6 +692,7 @@ func jobEnvFileToModel(envs map[string]jobEnvFileShape) map[string]smplkit.JobEn
 			Enabled:       e.Enabled,
 			Schedule:      e.Schedule,
 			Timezone:      e.Timezone,
+			RetryPolicy:   e.RetryPolicy,
 			Configuration: jobEnvShapeToConfig(e.Configuration),
 		}
 	}
@@ -769,6 +825,9 @@ func applyJobInputsToModel(job *smplkit.Job, shape *jobFileShape, in jobInputs) 
 	if in.timezoneSet {
 		job.Timezone = in.timezone
 	}
+	if in.retryPolicySet {
+		job.RetryPolicy = in.retryPolicy
+	}
 	if in.urlSet {
 		job.Configuration.URL = in.url
 	}
@@ -810,6 +869,9 @@ func applyJobFileToModel(job *smplkit.Job, shape *jobFileShape) {
 	}
 	if shape.Timezone != "" {
 		job.Timezone = shape.Timezone
+	}
+	if shape.RetryPolicy != "" {
+		job.RetryPolicy = shape.RetryPolicy
 	}
 	if shape.ConcurrencyPolicy != "" {
 		job.ConcurrencyPolicy = shape.ConcurrencyPolicy

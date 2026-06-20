@@ -780,6 +780,149 @@ func TestApplyJobFileToModel_Timezone(t *testing.T) {
 	}
 }
 
+// TestBuildJobForCreate_RetryPolicyFromFlag verifies --retry-policy lands on
+// the base job when supplied (via WithJobRetryPolicy).
+func TestBuildJobForCreate_RetryPolicyFromFlag(t *testing.T) {
+	ns := testJobsClient(t)
+	job, err := buildJobForCreate(ns, "j", nil, jobInputs{
+		schedule:       "0 0 * * *",
+		scheduleSet:    true,
+		retryPolicy:    "aggressive",
+		retryPolicySet: true,
+		url:            "https://x.test",
+		urlSet:         true,
+	})
+	if err != nil {
+		t.Fatalf("buildJobForCreate: %v", err)
+	}
+	if job.RetryPolicy != "aggressive" {
+		t.Errorf("retry policy from flag: %q", job.RetryPolicy)
+	}
+}
+
+// TestBuildJobForCreate_RetryPolicyFromFile verifies the base retry policy
+// falls back to the -f file when the flag is absent (flag wins, else file).
+func TestBuildJobForCreate_RetryPolicyFromFile(t *testing.T) {
+	ns := testJobsClient(t)
+	shape := &jobFileShape{
+		Schedule:      "0 4 * * *",
+		RetryPolicy:   "from-file",
+		Configuration: &output.JobHTTPConfigAttr{URL: "https://file.test"},
+	}
+	job, err := buildJobForCreate(ns, "j", shape, jobInputs{})
+	if err != nil {
+		t.Fatalf("buildJobForCreate: %v", err)
+	}
+	if job.RetryPolicy != "from-file" {
+		t.Errorf("retry policy should fall back to the file: %q", job.RetryPolicy)
+	}
+}
+
+// TestApplyJobInputsToModel_RetryPolicyScalar verifies --retry-policy updates
+// the base policy on the apply path and leaves it untouched when unset.
+func TestApplyJobInputsToModel_RetryPolicyScalar(t *testing.T) {
+	existing := &smplkit.Job{
+		ID:            "j",
+		RetryPolicy:   "old",
+		Configuration: smplkit.HttpConfig{URL: "https://orig.test"},
+	}
+	in := jobInputs{retryPolicy: "new", retryPolicySet: true}
+	if err := applyJobInputsToModel(existing, nil, in); err != nil {
+		t.Fatalf("applyJobInputsToModel: %v", err)
+	}
+	if existing.RetryPolicy != "new" {
+		t.Errorf("retry policy not updated: %q", existing.RetryPolicy)
+	}
+	// A second apply without the flag must leave it untouched.
+	if err := applyJobInputsToModel(existing, nil, jobInputs{name: "X", nameSet: true}); err != nil {
+		t.Fatalf("applyJobInputsToModel: %v", err)
+	}
+	if existing.RetryPolicy != "new" {
+		t.Errorf("retry policy should survive an apply that does not set it: %q", existing.RetryPolicy)
+	}
+}
+
+// TestApplyJobFileToModel_RetryPolicy verifies a -f file's base retry policy is
+// applied when set.
+func TestApplyJobFileToModel_RetryPolicy(t *testing.T) {
+	existing := &smplkit.Job{ID: "j", Configuration: smplkit.HttpConfig{URL: "https://orig.test"}}
+	applyJobFileToModel(existing, &jobFileShape{RetryPolicy: "from-file"})
+	if existing.RetryPolicy != "from-file" {
+		t.Errorf("retry policy from file: %q", existing.RetryPolicy)
+	}
+}
+
+// TestJobEnvFileToModel_CarriesRetryPolicy verifies the per-environment retry
+// policy override round-trips from the file shape onto each environment.
+func TestJobEnvFileToModel_CarriesRetryPolicy(t *testing.T) {
+	envs := jobEnvFileToModel(map[string]jobEnvFileShape{
+		"production": {Enabled: true, RetryPolicy: "prod-policy"},
+	})
+	if got := envs["production"].RetryPolicy; got != "prod-policy" {
+		t.Errorf("per-env retry policy should carry through: %q", got)
+	}
+}
+
+// TestParseRunTrigger covers the --trigger value mapping: each valid spelling
+// (case-insensitive) maps to its SDK enum, and anything else is rejected.
+func TestParseRunTrigger(t *testing.T) {
+	cases := map[string]smplkit.RunTrigger{
+		"MANUAL":   smplkit.RunTriggerManual,
+		"rerun":    smplkit.RunTriggerRerun,
+		" retry ":  smplkit.RunTriggerRetry,
+		"Schedule": smplkit.RunTriggerSchedule,
+	}
+	for in, want := range cases {
+		got, err := parseRunTrigger(in)
+		if err != nil {
+			t.Errorf("parseRunTrigger(%q): %v", in, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("parseRunTrigger(%q) = %q want %q", in, got, want)
+		}
+	}
+	if _, err := parseRunTrigger("CRON"); err == nil {
+		t.Error("expected error for an invalid --trigger value")
+	}
+}
+
+// TestParseRunTriggers verifies the list helper validates each entry and
+// rejects an invalid one.
+func TestParseRunTriggers(t *testing.T) {
+	got, err := parseRunTriggers([]string{"retry", "MANUAL"})
+	if err != nil {
+		t.Fatalf("parseRunTriggers: %v", err)
+	}
+	if len(got) != 2 || got[0] != smplkit.RunTriggerRetry || got[1] != smplkit.RunTriggerManual {
+		t.Errorf("parseRunTriggers: %#v", got)
+	}
+	if _, err := parseRunTriggers([]string{"retry", "bogus"}); err == nil {
+		t.Error("expected error when a trigger in the list is invalid")
+	}
+}
+
+// TestJobRunsListCmd_TriggerAndLastRunOnly verifies the new --trigger and
+// --last-run-only flags are wired, and that an invalid --trigger is rejected
+// before any client call.
+func TestJobRunsListCmd_TriggerAndLastRunOnly(t *testing.T) {
+	cmd := jobRunsListCmd()
+	if cmd.Flags().Lookup("trigger") == nil {
+		t.Error("runs list command missing --trigger flag")
+	}
+	if cmd.Flags().Lookup("last-run-only") == nil {
+		t.Error("runs list command missing --last-run-only flag")
+	}
+	cmd.SetArgs([]string{"--trigger", "BOGUS"})
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	err := cmd.Execute()
+	const want = "invalid --trigger"
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("--trigger BOGUS: got err %v, want containing %q", err, want)
+	}
+}
+
 // testJobsClient builds a JobsClient for the pure builder helpers. The SDK
 // does no I/O at construction, so a dummy API key is enough; ns.New only
 // assembles an in-memory *Job.

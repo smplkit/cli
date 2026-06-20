@@ -70,6 +70,7 @@ func newRootCmd(version string) *cobra.Command {
 	registerServiceCmd(root)
 	registerAuditCmd(root)
 	registerJobCmd(root)
+	registerRetryPolicyCmd(root)
 
 	return root
 }
