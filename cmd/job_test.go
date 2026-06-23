@@ -71,12 +71,12 @@ func TestParseJobHeaders(t *testing.T) {
 	if len(hdrs) != 2 {
 		t.Fatalf("want 2 headers, got %d: %#v", len(hdrs), hdrs)
 	}
-	if hdrs[0].Name != "X-Source" || hdrs[0].Value != "cli" {
-		t.Errorf("header 0: %#v", hdrs[0])
+	if hdrs["X-Source"] != "cli" {
+		t.Errorf("X-Source: %q", hdrs["X-Source"])
 	}
 	// Split on the FIRST colon: the value keeps its own colons.
-	if hdrs[1].Name != "Authorization" || hdrs[1].Value != "Bearer abc:def" {
-		t.Errorf("header 1: %#v", hdrs[1])
+	if hdrs["Authorization"] != "Bearer abc:def" {
+		t.Errorf("Authorization: %q", hdrs["Authorization"])
 	}
 }
 
@@ -159,7 +159,7 @@ func TestBuildJobHTTPConfig_ScalarOverridesFile(t *testing.T) {
 		t.Errorf("file method should be preserved when --method unset: %q", cfg.Method)
 	}
 	// Scalar headers replace the file's headers entirely.
-	if len(cfg.Headers) != 1 || cfg.Headers[0].Name != "X-Flag" {
+	if len(cfg.Headers) != 1 || cfg.Headers["X-Flag"] != "2" {
 		t.Errorf("scalar headers should replace file headers: %#v", cfg.Headers)
 	}
 }
@@ -290,7 +290,7 @@ func TestApplyJobInputsToModel_PreservesUnspecified(t *testing.T) {
 		Name:              "Original",
 		Description:       &desc,
 		Schedule:          "0 0 * * *",
-		Environments:      map[string]smplkit.JobEnvironment{"production": {Enabled: true}},
+		Environments:      map[string]*smplkit.JobEnvironment{"production": {Enabled: true}},
 		ConcurrencyPolicy: "ALLOW",
 		Configuration: smplkit.HttpConfig{
 			URL:           "https://orig.test",
@@ -299,9 +299,7 @@ func TestApplyJobInputsToModel_PreservesUnspecified(t *testing.T) {
 			SuccessStatus: "204",
 			Timeout:       45,
 			TlsVerify:     &tls,
-			Headers: []smplkit.HttpHeader{
-				{Name: "Authorization", Value: "Bearer secret"},
-			},
+			Headers:       map[string]string{"Authorization": "Bearer secret"},
 		},
 	}
 	// Only change the schedule. Everything else must survive — this is the
@@ -338,7 +336,7 @@ func TestApplyJobInputsToModel_PreservesUnspecified(t *testing.T) {
 		t.Errorf("tls_verify=false should be preserved: %v", existing.Configuration.TlsVerify)
 	}
 	if len(existing.Configuration.Headers) != 1 ||
-		existing.Configuration.Headers[0].Value != "Bearer secret" {
+		existing.Configuration.Headers["Authorization"] != "Bearer secret" {
 		t.Errorf("header value should be preserved: %#v", existing.Configuration.Headers)
 	}
 	if existing.Configuration.Body == nil || *existing.Configuration.Body != "ping" {
@@ -375,7 +373,7 @@ func TestApplyJobInputsToModel_UpdatesHeaderValue(t *testing.T) {
 		ID: "j",
 		Configuration: smplkit.HttpConfig{
 			URL:     "https://orig.test",
-			Headers: []smplkit.HttpHeader{{Name: "Authorization", Value: "Bearer OLD"}},
+			Headers: map[string]string{"Authorization": "Bearer OLD"},
 		},
 	}
 	in := jobInputs{headers: []string{"Authorization: Bearer NEW"}, headerSet: true}
@@ -383,7 +381,7 @@ func TestApplyJobInputsToModel_UpdatesHeaderValue(t *testing.T) {
 		t.Fatalf("applyJobInputsToModel: %v", err)
 	}
 	if len(existing.Configuration.Headers) != 1 ||
-		existing.Configuration.Headers[0].Value != "Bearer NEW" {
+		existing.Configuration.Headers["Authorization"] != "Bearer NEW" {
 		t.Errorf("rotated header value should reconcile: %#v", existing.Configuration.Headers)
 	}
 }
@@ -397,9 +395,9 @@ func TestApplyJobInputsToModel_HeaderReplaceIsFullSet(t *testing.T) {
 		ID: "j",
 		Configuration: smplkit.HttpConfig{
 			URL: "https://orig.test",
-			Headers: []smplkit.HttpHeader{
-				{Name: "Authorization", Value: "Bearer OLD"},
-				{Name: "Content-Type", Value: "application/json"},
+			Headers: map[string]string{
+				"Authorization": "Bearer OLD",
+				"Content-Type":  "application/json",
 			},
 		},
 	}
@@ -408,7 +406,7 @@ func TestApplyJobInputsToModel_HeaderReplaceIsFullSet(t *testing.T) {
 		t.Fatalf("applyJobInputsToModel: %v", err)
 	}
 	if len(existing.Configuration.Headers) != 1 ||
-		existing.Configuration.Headers[0].Value != "Bearer NEW" {
+		existing.Configuration.Headers["Authorization"] != "Bearer NEW" {
 		t.Errorf("--header should replace the full set: %#v", existing.Configuration.Headers)
 	}
 }
@@ -419,7 +417,6 @@ func TestApplyJobFileToModel_AppliesSetFieldsOnly(t *testing.T) {
 		ID:       "j",
 		Name:     "Original",
 		Schedule: "0 0 * * *",
-		Enabled:  true,
 		Configuration: smplkit.HttpConfig{
 			URL:           "https://orig.test",
 			Method:        smplkit.JobHttpMethodPost,
@@ -503,7 +500,7 @@ func TestApplyJobFileToModel_AllConfigFields(t *testing.T) {
 		ConcurrencyPolicy: "ALLOW",
 		Configuration: smplkit.HttpConfig{
 			URL:     "https://orig.test",
-			Headers: []smplkit.HttpHeader{{Name: "X-Old", Value: "1"}},
+			Headers: map[string]string{"X-Old": "1"},
 		},
 	}
 	shape := &jobFileShape{
@@ -533,7 +530,7 @@ func TestApplyJobFileToModel_AllConfigFields(t *testing.T) {
 		t.Errorf("ca_cert: %v", c.CaCert)
 	}
 	// File headers replace the existing ones.
-	if len(c.Headers) != 1 || c.Headers[0].Name != "X-New" {
+	if len(c.Headers) != 1 || c.Headers["X-New"] != "2" {
 		t.Errorf("file headers should replace existing: %#v", c.Headers)
 	}
 }
@@ -564,8 +561,8 @@ func TestApplyJobEnvToggles_EnableDisablePreserveConfig(t *testing.T) {
 	// --disable-env on that environment must flip enabled without dropping
 	// the configuration, and --enable-env on a fresh environment creates it.
 	job := &smplkit.Job{
-		Environments: map[string]smplkit.JobEnvironment{
-			"production": {Enabled: true, Configuration: &smplkit.HttpConfig{URL: "https://prod.test"}},
+		Environments: map[string]*smplkit.JobEnvironment{
+			"production": {Enabled: true, URL: "https://prod.test"},
 		},
 	}
 	if err := applyJobEnvToggles(job, []string{"staging"}, []string{"production"}); err != nil {
@@ -574,8 +571,9 @@ func TestApplyJobEnvToggles_EnableDisablePreserveConfig(t *testing.T) {
 	if job.Environments["production"].Enabled {
 		t.Error("production should be disabled after --disable-env")
 	}
-	if cfg := job.Environments["production"].Configuration; cfg == nil || cfg.URL != "https://prod.test" {
-		t.Errorf("production configuration override should be preserved: %+v", cfg)
+	// The per-environment override leaf (ADR-056) must survive the enablement flip.
+	if url := job.Environments["production"].URL; url != "https://prod.test" {
+		t.Errorf("production override leaf should be preserved: %q", url)
 	}
 	if !job.Environments["staging"].Enabled {
 		t.Error("staging should be enabled after --enable-env")
@@ -633,7 +631,7 @@ func TestBuildJobEnvironments_TogglesOnly(t *testing.T) {
 func TestApplyJobInputsToModel_EnvToggles(t *testing.T) {
 	existing := &smplkit.Job{
 		ID:            "j",
-		Environments:  map[string]smplkit.JobEnvironment{"production": {Enabled: true}},
+		Environments:  map[string]*smplkit.JobEnvironment{"production": {Enabled: true}},
 		Configuration: smplkit.HttpConfig{URL: "https://orig.test"},
 	}
 	in := jobInputs{enableEnvs: []string{"staging"}, disableEnvs: []string{"production"}}
@@ -662,7 +660,7 @@ func TestApplyJobFileToModel_FullReplacesEnvironments(t *testing.T) {
 	// configuration overrides carried through.
 	existing := &smplkit.Job{
 		ID:            "j",
-		Environments:  map[string]smplkit.JobEnvironment{"production": {Enabled: true}},
+		Environments:  map[string]*smplkit.JobEnvironment{"production": {Enabled: true}},
 		Configuration: smplkit.HttpConfig{URL: "https://orig.test"},
 	}
 	shape := &jobFileShape{
@@ -677,8 +675,9 @@ func TestApplyJobFileToModel_FullReplacesEnvironments(t *testing.T) {
 	if !existing.Environments["staging"].Enabled {
 		t.Error("staging should be enabled from the file")
 	}
-	if cfg := existing.Environments["staging"].Configuration; cfg == nil || cfg.URL != "https://staging.test" {
-		t.Errorf("staging per-env configuration override should be applied: %+v", cfg)
+	// The nested per-env configuration flattens onto the override's URL leaf.
+	if url := existing.Environments["staging"].URL; url != "https://staging.test" {
+		t.Errorf("staging per-env override leaf should be applied: %q", url)
 	}
 }
 

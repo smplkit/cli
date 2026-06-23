@@ -28,7 +28,18 @@ cover: ## Run unit tests with coverage.
 
 .PHONY: accept
 accept: ## Run acceptance tests against the local platform (ADR-042).
-	ACC=1 go test ./acceptance/... -v -timeout 20m -count=1
+	@key="$${SMPLKIT_API_KEY:-$$(awk '/^\[local-acceptance\]/{p=1;next}/^\[/{p=0}p&&/^[[:space:]]*api_key/{sub(/^[^=]*=[[:space:]]*/,"");print;exit}' $$HOME/.smplkit 2>/dev/null)}"; \
+	if [ -z "$$key" ]; then \
+		echo "ERROR: no SMPLKIT_API_KEY set and no [local-acceptance] profile in ~/.smplkit." >&2; \
+		echo "  These acceptance tests are destructive: they delete the authenticating account's" >&2; \
+		echo "  'development' environment to free a managed slot. Run them ONLY as the dedicated," >&2; \
+		echo "  isolated local-acceptance account — never your dev/preview account." >&2; \
+		echo "  Provision it once with:" >&2; \
+		echo "    python3 ~/projects/.github/platform/seed-acceptance-account.py" >&2; \
+		echo "  (see ~/projects/.github/docs/local-testing.md)." >&2; \
+		exit 1; \
+	fi; \
+	ACC=1 SMPLKIT_API_KEY="$$key" go test ./acceptance/... -v -timeout 20m -count=1
 
 ##@ Lint
 

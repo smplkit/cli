@@ -100,7 +100,7 @@ func TestRenderer_Forwarder_Table(t *testing.T) {
 		ID:            "siem",
 		Name:          "SIEM",
 		ForwarderType: smplkit.ForwarderTypeHTTP,
-		Environments: map[string]smplkit.ForwarderEnvironment{
+		Environments: map[string]*smplkit.ForwarderEnvironment{
 			"production": {Enabled: true},
 			"staging":    {Enabled: false},
 		},
@@ -176,13 +176,15 @@ func TestRenderer_Forwarder_JSON_SmplEvents(t *testing.T) {
 }
 
 func TestRenderer_Forwarder_JSON_Environments(t *testing.T) {
-	override := smplkit.HttpConfiguration{URL: "https://prod.example.com"}
+	// Per-environment overrides are now flat leaves (ADR-056): the URL override
+	// is set directly on the environment, and the renderer reconstructs the
+	// CLI's nested `configuration` block from it.
 	fwd := smplkit.Forwarder{
 		ID:            "siem",
 		Name:          "SIEM",
 		ForwarderType: smplkit.ForwarderTypeHTTP,
-		Environments: map[string]smplkit.ForwarderEnvironment{
-			"production": {Enabled: true, Configuration: &override},
+		Environments: map[string]*smplkit.ForwarderEnvironment{
+			"production": {Enabled: true, URL: "https://prod.example.com"},
 		},
 		Configuration: smplkit.HttpConfiguration{URL: "https://base.example.com"},
 	}
@@ -212,21 +214,18 @@ func TestRenderer_Job_JSON(t *testing.T) {
 		ID:                "housekeeping",
 		Name:              "Housekeeping",
 		Description:       &desc,
-		Enabled:           true,
 		Type:              "http",
 		Schedule:          "0 3 * * *",
 		Timezone:          "America/New_York",
 		ConcurrencyPolicy: "ALLOW",
-		Environments: map[string]smplkit.JobEnvironment{
+		Environments: map[string]*smplkit.JobEnvironment{
 			"production": {Enabled: true, Timezone: "Europe/London", NextRunAt: &next},
 		},
 		Configuration: smplkit.HttpConfig{
-			URL:    "https://admin.example.com/execute",
-			Method: smplkit.JobHttpMethodPost,
-			Body:   &body,
-			Headers: []smplkit.HttpHeader{
-				{Name: "Authorization", Value: "Bearer abc"},
-			},
+			URL:     "https://admin.example.com/execute",
+			Method:  smplkit.JobHttpMethodPost,
+			Body:    &body,
+			Headers: map[string]string{"Authorization": "Bearer abc"},
 		},
 	}
 	var buf bytes.Buffer
@@ -284,7 +283,6 @@ func TestRenderer_Jobs_Table(t *testing.T) {
 			Name:     "A",
 			Schedule: "0 0 * * *",
 			Timezone: "America/New_York",
-			Enabled:  true,
 			Configuration: smplkit.HttpConfig{
 				URL:    "https://a.test",
 				Method: smplkit.JobHttpMethodGet,
@@ -335,7 +333,7 @@ func TestRenderer_Jobs_Table(t *testing.T) {
 
 func TestRenderer_Jobs_JSONList(t *testing.T) {
 	jobs := []*smplkit.Job{
-		{ID: "a", Name: "A", Schedule: "0 0 * * *", Enabled: true,
+		{ID: "a", Name: "A", Schedule: "0 0 * * *",
 			Configuration: smplkit.HttpConfig{URL: "https://a.test", Method: smplkit.JobHttpMethodPost}},
 		{ID: "b", Name: "B", Schedule: "now",
 			Configuration: smplkit.HttpConfig{URL: "https://b.test", Method: smplkit.JobHttpMethodGet}},
@@ -360,7 +358,7 @@ func TestRenderer_Job_JSON_RetryPolicy(t *testing.T) {
 		Name:        "Housekeeping",
 		Schedule:    "0 3 * * *",
 		RetryPolicy: "aggressive",
-		Environments: map[string]smplkit.JobEnvironment{
+		Environments: map[string]*smplkit.JobEnvironment{
 			"production": {Enabled: true, RetryPolicy: "prod-policy"},
 		},
 		Configuration: smplkit.HttpConfig{URL: "https://x.test", Method: smplkit.JobHttpMethodPost},
@@ -387,17 +385,17 @@ func TestRenderer_RetryPolicy_JSON(t *testing.T) {
 	mds := 60
 	created := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC)
 	p := &smplkit.RetryPolicy{
-		ID:              "aggressive",
-		Name:            "Aggressive",
-		MaxRetries:      5,
-		Backoff:         smplkit.BackoffExponential,
-		DelaySeconds:    2,
-		MaxDelaySeconds: &mds,
-		RetryOn: smplkit.RetryOn{
-			Statuses: []int{429, 503},
-			Reasons:  []smplkit.RetryReason{smplkit.RetryReasonTimeout},
-		},
-		CreatedAt: &created,
+		ID:                     "aggressive",
+		Name:                   "Aggressive",
+		MaxRetries:             5,
+		Backoff:                smplkit.BackoffExponential,
+		DelaySeconds:           2,
+		MaxDelaySeconds:        &mds,
+		RetryOnTimeout:         true,
+		RetryOnConnectionError: true,
+		RetryStatuses:          []string{"429", "5xx"},
+		RetryStatusesExcept:    []string{"501"},
+		CreatedAt:              &created,
 	}
 	var buf bytes.Buffer
 	r := NewRenderer(&buf, cliconfig.OutputJSON, false)
@@ -414,11 +412,14 @@ func TestRenderer_RetryPolicy_JSON(t *testing.T) {
 	if got.MaxDelaySeconds == nil || *got.MaxDelaySeconds != 60 {
 		t.Errorf("max_delay_seconds not projected: %v", got.MaxDelaySeconds)
 	}
-	if len(got.RetryOn.Statuses) != 2 || got.RetryOn.Statuses[0] != 429 {
-		t.Errorf("retry_on.statuses: %#v", got.RetryOn.Statuses)
+	if !got.RetryOnTimeout || !got.RetryOnConnectionError {
+		t.Errorf("retry-on booleans not projected: %+v", got)
 	}
-	if len(got.RetryOn.Reasons) != 1 || got.RetryOn.Reasons[0] != smplkit.RetryReasonTimeout {
-		t.Errorf("retry_on.reasons: %#v", got.RetryOn.Reasons)
+	if len(got.RetryStatuses) != 2 || got.RetryStatuses[0] != "429" || got.RetryStatuses[1] != "5xx" {
+		t.Errorf("retry_statuses: %#v", got.RetryStatuses)
+	}
+	if len(got.RetryStatusesExcept) != 1 || got.RetryStatusesExcept[0] != "501" {
+		t.Errorf("retry_statuses_except: %#v", got.RetryStatusesExcept)
 	}
 }
 

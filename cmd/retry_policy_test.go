@@ -33,49 +33,6 @@ func TestParseBackoff(t *testing.T) {
 	}
 }
 
-// TestParseRetryReason covers the --retry-reason value mapping: each valid
-// spelling (case-insensitive) maps to its SDK enum, and anything else is
-// rejected.
-func TestParseRetryReason(t *testing.T) {
-	cases := map[string]smplkit.RetryReason{
-		"CONNECTION_ERROR":   smplkit.RetryReasonConnectionError,
-		"connection_error":   smplkit.RetryReasonConnectionError,
-		"NON_SUCCESS_STATUS": smplkit.RetryReasonNonSuccessStatus,
-		" timeout ":          smplkit.RetryReasonTimeout,
-	}
-	for in, want := range cases {
-		got, err := parseRetryReason(in)
-		if err != nil {
-			t.Errorf("parseRetryReason(%q): %v", in, err)
-			continue
-		}
-		if got != want {
-			t.Errorf("parseRetryReason(%q) = %q want %q", in, got, want)
-		}
-	}
-	if _, err := parseRetryReason("BOGUS"); err == nil {
-		t.Error("expected error for an invalid --retry-reason value")
-	}
-}
-
-// TestParseRetryReasons verifies the list helper validates each entry and that
-// a nil/empty input yields a nil slice (retries nothing).
-func TestParseRetryReasons(t *testing.T) {
-	got, err := parseRetryReasons([]string{"timeout", "CONNECTION_ERROR"})
-	if err != nil {
-		t.Fatalf("parseRetryReasons: %v", err)
-	}
-	if len(got) != 2 || got[0] != smplkit.RetryReasonTimeout || got[1] != smplkit.RetryReasonConnectionError {
-		t.Errorf("parseRetryReasons: %#v", got)
-	}
-	if nilSlice, err := parseRetryReasons(nil); err != nil || nilSlice != nil {
-		t.Errorf("empty input should yield (nil, nil): %#v %v", nilSlice, err)
-	}
-	if _, err := parseRetryReasons([]string{"timeout", "bogus"}); err == nil {
-		t.Error("expected error when a reason in the list is invalid")
-	}
-}
-
 // TestRetryPolicyCreateCmd_InvalidBackoff verifies --backoff rejects a value
 // outside exponential/fixed before any client call.
 func TestRetryPolicyCreateCmd_InvalidBackoff(t *testing.T) {
@@ -90,19 +47,26 @@ func TestRetryPolicyCreateCmd_InvalidBackoff(t *testing.T) {
 }
 
 // TestRetryPolicyScalarFlags_Wired verifies the create/apply scalar flags are
-// registered with the expected long kebab-case names.
+// registered with the expected long kebab-case names. The retry conditions are
+// now expressed as status patterns plus two booleans (ADR retry reshape),
+// replacing the old --retry-reason enum.
 func TestRetryPolicyScalarFlags_Wired(t *testing.T) {
 	cmd := retryPolicyCreateCmd()
 	for _, name := range []string{
-		"name", "max-retries", "backoff", "delay-seconds",
-		"max-delay-seconds", "retry-status", "retry-reason", "file",
+		"name", "max-retries", "backoff", "delay-seconds", "max-delay-seconds",
+		"retry-status", "retry-status-except", "retry-on-timeout",
+		"retry-on-connection-error", "file",
 	} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("create command missing --%s flag", name)
 		}
 	}
+	// The legacy --retry-reason flag is gone.
+	if cmd.Flags().Lookup("retry-reason") != nil {
+		t.Error("legacy --retry-reason flag must be removed")
+	}
 	apply := retryPolicyApplyCmd()
-	for _, name := range []string{"max-retries", "retry-status", "retry-reason"} {
+	for _, name := range []string{"max-retries", "retry-status", "retry-status-except", "retry-on-timeout", "retry-on-connection-error"} {
 		if apply.Flags().Lookup(name) == nil {
 			t.Errorf("apply command missing --%s flag", name)
 		}
@@ -144,7 +108,7 @@ func TestBuildRetryPolicyForCreate_NameDefaultsToID(t *testing.T) {
 	}
 }
 
-func TestBuildRetryPolicyForCreate_FlagsAndRetryOn(t *testing.T) {
+func TestBuildRetryPolicyForCreate_FlagsAndConditions(t *testing.T) {
 	ns := testRetryPoliciesClient(t)
 	p, err := buildRetryPolicyForCreate(ns, "p", nil, retryPolicyInputs{
 		name: "Aggressive", nameSet: true,
@@ -152,8 +116,10 @@ func TestBuildRetryPolicyForCreate_FlagsAndRetryOn(t *testing.T) {
 		backoff: "fixed", backoffSet: true,
 		delaySeconds: 10, delaySecondsSet: true,
 		maxDelaySeconds: 0, maxDelaySecondsSet: true, // fixed backoff: max-delay 0 must be omitted
-		retryStatuses: []int{429, 503}, retryStatusesSet: true,
-		retryReasons: []string{"TIMEOUT"}, retryReasonsSet: true,
+		retryStatuses: []string{"429", "5xx"}, retryStatusesSet: true,
+		retryStatusesExcept: []string{"501"}, retryStatusesExceptSet: true,
+		retryOnTimeout: true, retryOnTimeoutSet: true,
+		retryOnConnectionError: true, retryOnConnectionErrorSet: true,
 	})
 	if err != nil {
 		t.Fatalf("buildRetryPolicyForCreate: %v", err)
@@ -165,11 +131,14 @@ func TestBuildRetryPolicyForCreate_FlagsAndRetryOn(t *testing.T) {
 	if p.MaxDelaySeconds != nil {
 		t.Errorf("max-delay-seconds 0 should leave the cap nil: %v", p.MaxDelaySeconds)
 	}
-	if len(p.RetryOn.Statuses) != 2 || p.RetryOn.Statuses[0] != 429 {
-		t.Errorf("retry-status: %#v", p.RetryOn.Statuses)
+	if len(p.RetryStatuses) != 2 || p.RetryStatuses[0] != "429" || p.RetryStatuses[1] != "5xx" {
+		t.Errorf("retry-status: %#v", p.RetryStatuses)
 	}
-	if len(p.RetryOn.Reasons) != 1 || p.RetryOn.Reasons[0] != smplkit.RetryReasonTimeout {
-		t.Errorf("retry-reason: %#v", p.RetryOn.Reasons)
+	if len(p.RetryStatusesExcept) != 1 || p.RetryStatusesExcept[0] != "501" {
+		t.Errorf("retry-status-except: %#v", p.RetryStatusesExcept)
+	}
+	if !p.RetryOnTimeout || !p.RetryOnConnectionError {
+		t.Errorf("retry-on booleans: timeout=%v conn=%v", p.RetryOnTimeout, p.RetryOnConnectionError)
 	}
 }
 
@@ -194,16 +163,15 @@ func TestBuildRetryPolicyForCreate_FromFile(t *testing.T) {
 	mr := 2
 	ds := 7
 	mds := 120
+	onConn := true
 	shape := &retryPolicyFileShape{
-		Name:            "From File",
-		MaxRetries:      &mr,
-		Backoff:         "exponential",
-		DelaySeconds:    &ds,
-		MaxDelaySeconds: &mds,
-		RetryOn: &retryOnFileShape{
-			Statuses: []int{500},
-			Reasons:  []string{"NON_SUCCESS_STATUS"},
-		},
+		Name:                   "From File",
+		MaxRetries:             &mr,
+		Backoff:                "exponential",
+		DelaySeconds:           &ds,
+		MaxDelaySeconds:        &mds,
+		RetryStatuses:          []string{"500"},
+		RetryOnConnectionError: &onConn,
 	}
 	p, err := buildRetryPolicyForCreate(ns, "p", shape, retryPolicyInputs{})
 	if err != nil {
@@ -215,21 +183,11 @@ func TestBuildRetryPolicyForCreate_FromFile(t *testing.T) {
 	if p.MaxDelaySeconds == nil || *p.MaxDelaySeconds != 120 {
 		t.Errorf("max-delay-seconds from file: %v", p.MaxDelaySeconds)
 	}
-	if len(p.RetryOn.Statuses) != 1 || p.RetryOn.Statuses[0] != 500 {
-		t.Errorf("retry_on.statuses from file: %#v", p.RetryOn.Statuses)
+	if len(p.RetryStatuses) != 1 || p.RetryStatuses[0] != "500" {
+		t.Errorf("retry_statuses from file: %#v", p.RetryStatuses)
 	}
-	if len(p.RetryOn.Reasons) != 1 || p.RetryOn.Reasons[0] != smplkit.RetryReasonNonSuccessStatus {
-		t.Errorf("retry_on.reasons from file: %#v", p.RetryOn.Reasons)
-	}
-}
-
-func TestBuildRetryPolicyForCreate_InvalidFileReason(t *testing.T) {
-	ns := testRetryPoliciesClient(t)
-	shape := &retryPolicyFileShape{
-		RetryOn: &retryOnFileShape{Reasons: []string{"BOGUS"}},
-	}
-	if _, err := buildRetryPolicyForCreate(ns, "p", shape, retryPolicyInputs{}); err == nil {
-		t.Error("expected error for an invalid retry_on reason in the file")
+	if !p.RetryOnConnectionError {
+		t.Errorf("retry_on_connection_error from file should be true: %v", p.RetryOnConnectionError)
 	}
 }
 
@@ -242,10 +200,8 @@ func TestApplyRetryPolicyInputsToModel_PreservesUnspecified(t *testing.T) {
 		Backoff:         smplkit.BackoffExponential,
 		DelaySeconds:    5,
 		MaxDelaySeconds: &mds,
-		RetryOn: smplkit.RetryOn{
-			Statuses: []int{429},
-			Reasons:  []smplkit.RetryReason{smplkit.RetryReasonTimeout},
-		},
+		RetryOnTimeout:  true,
+		RetryStatuses:   []string{"429"},
 	}
 	// Only change max-retries. Everything else must survive.
 	in := retryPolicyInputs{maxRetries: 7, maxRetriesSet: true}
@@ -264,11 +220,11 @@ func TestApplyRetryPolicyInputsToModel_PreservesUnspecified(t *testing.T) {
 	if existing.MaxDelaySeconds == nil || *existing.MaxDelaySeconds != 90 {
 		t.Errorf("max-delay-seconds should be preserved: %v", existing.MaxDelaySeconds)
 	}
-	if len(existing.RetryOn.Statuses) != 1 || existing.RetryOn.Statuses[0] != 429 {
-		t.Errorf("retry_on.statuses should be preserved: %#v", existing.RetryOn.Statuses)
+	if !existing.RetryOnTimeout {
+		t.Errorf("retry_on_timeout should be preserved: %v", existing.RetryOnTimeout)
 	}
-	if len(existing.RetryOn.Reasons) != 1 || existing.RetryOn.Reasons[0] != smplkit.RetryReasonTimeout {
-		t.Errorf("retry_on.reasons should be preserved: %#v", existing.RetryOn.Reasons)
+	if len(existing.RetryStatuses) != 1 || existing.RetryStatuses[0] != "429" {
+		t.Errorf("retry_statuses should be preserved: %#v", existing.RetryStatuses)
 	}
 }
 
@@ -311,34 +267,33 @@ func TestApplyRetryPolicyInputsToModel_InvalidBackoff(t *testing.T) {
 	}
 }
 
-func TestApplyRetryPolicyInputsToModel_InvalidReason(t *testing.T) {
-	existing := &smplkit.RetryPolicy{ID: "p"}
-	in := retryPolicyInputs{retryReasons: []string{"BOGUS"}, retryReasonsSet: true}
-	if err := applyRetryPolicyInputsToModel(existing, nil, in); err == nil {
-		t.Error("expected error for an invalid --retry-reason on apply")
-	}
-}
-
-func TestApplyRetryPolicyInputsToModel_ReplacesRetryOnLists(t *testing.T) {
+func TestApplyRetryPolicyInputsToModel_ReplacesConditions(t *testing.T) {
 	existing := &smplkit.RetryPolicy{
-		ID: "p",
-		RetryOn: smplkit.RetryOn{
-			Statuses: []int{429, 503},
-			Reasons:  []smplkit.RetryReason{smplkit.RetryReasonTimeout},
-		},
+		ID:                  "p",
+		RetryStatuses:       []string{"429", "503"},
+		RetryStatusesExcept: []string{"500"},
+		RetryOnTimeout:      true,
 	}
 	in := retryPolicyInputs{
-		retryStatuses: []int{500}, retryStatusesSet: true,
-		retryReasons: []string{"CONNECTION_ERROR"}, retryReasonsSet: true,
+		retryStatuses: []string{"5xx"}, retryStatusesSet: true,
+		retryStatusesExcept: []string{"501"}, retryStatusesExceptSet: true,
+		retryOnConnectionError: true, retryOnConnectionErrorSet: true,
 	}
 	if err := applyRetryPolicyInputsToModel(existing, nil, in); err != nil {
 		t.Fatalf("applyRetryPolicyInputsToModel: %v", err)
 	}
-	if len(existing.RetryOn.Statuses) != 1 || existing.RetryOn.Statuses[0] != 500 {
-		t.Errorf("--retry-status should replace the full list: %#v", existing.RetryOn.Statuses)
+	if len(existing.RetryStatuses) != 1 || existing.RetryStatuses[0] != "5xx" {
+		t.Errorf("--retry-status should replace the full list: %#v", existing.RetryStatuses)
 	}
-	if len(existing.RetryOn.Reasons) != 1 || existing.RetryOn.Reasons[0] != smplkit.RetryReasonConnectionError {
-		t.Errorf("--retry-reason should replace the full list: %#v", existing.RetryOn.Reasons)
+	if len(existing.RetryStatusesExcept) != 1 || existing.RetryStatusesExcept[0] != "501" {
+		t.Errorf("--retry-status-except should replace the full list: %#v", existing.RetryStatusesExcept)
+	}
+	if !existing.RetryOnConnectionError {
+		t.Errorf("--retry-on-connection-error should apply: %v", existing.RetryOnConnectionError)
+	}
+	// retry_on_timeout was not re-supplied, so it stays as it was on the model.
+	if !existing.RetryOnTimeout {
+		t.Errorf("retry_on_timeout should be untouched when its flag is absent: %v", existing.RetryOnTimeout)
 	}
 }
 
@@ -347,6 +302,28 @@ func TestApplyRetryPolicyFileToModel_InvalidBackoff(t *testing.T) {
 	shape := &retryPolicyFileShape{Backoff: "linear"}
 	if err := applyRetryPolicyFileToModel(existing, shape); err == nil {
 		t.Error("expected error for an invalid backoff in the file")
+	}
+}
+
+func TestApplyRetryPolicyFileToModel_AppliesConditions(t *testing.T) {
+	onTimeout := true
+	existing := &smplkit.RetryPolicy{ID: "p"}
+	shape := &retryPolicyFileShape{
+		RetryStatuses:       []string{"5xx"},
+		RetryStatusesExcept: []string{"501"},
+		RetryOnTimeout:      &onTimeout,
+	}
+	if err := applyRetryPolicyFileToModel(existing, shape); err != nil {
+		t.Fatalf("applyRetryPolicyFileToModel: %v", err)
+	}
+	if len(existing.RetryStatuses) != 1 || existing.RetryStatuses[0] != "5xx" {
+		t.Errorf("retry_statuses from file: %#v", existing.RetryStatuses)
+	}
+	if len(existing.RetryStatusesExcept) != 1 || existing.RetryStatusesExcept[0] != "501" {
+		t.Errorf("retry_statuses_except from file: %#v", existing.RetryStatusesExcept)
+	}
+	if !existing.RetryOnTimeout {
+		t.Errorf("retry_on_timeout from file: %v", existing.RetryOnTimeout)
 	}
 }
 

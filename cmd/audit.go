@@ -449,23 +449,33 @@ func buildForwarderForCreate(ns *smplkit.AuditForwarders, id string, shape *forw
 	return ns.New(id, effName, ft, cfg, opts...), nil
 }
 
-// fileEnvShapeToConfig converts the file/CLI HTTP-config attribute shape
-// into the SDK's HttpConfiguration used for per-environment overrides.
-func fileEnvShapeToConfig(c *output.ForwarderHTTPConfigAttr) *smplkit.HttpConfiguration {
-	if c == nil {
+// forwarderHeaderAttrsToMap converts the CLI's ordered header-attribute list
+// into the SDK's name→value header map (ADR-056). Returns nil for an empty list.
+func forwarderHeaderAttrsToMap(hs []output.ForwarderHeaderAttr) map[string]string {
+	if len(hs) == 0 {
 		return nil
 	}
-	cfg := smplkit.HttpConfiguration{
-		URL:           c.URL,
-		Method:        c.Method,
-		SuccessStatus: c.SuccessStatus,
-		TlsVerify:     c.TLSVerify,
-		CaCert:        c.CACert,
+	out := make(map[string]string, len(hs))
+	for _, h := range hs {
+		out[h.Name] = h.Value
 	}
-	for _, h := range c.Headers {
-		cfg.Headers = append(cfg.Headers, smplkit.HttpHeader{Name: h.Name, Value: h.Value})
+	return out
+}
+
+// applyForwarderConfigAttrToEnv flattens the CLI's nested per-environment
+// configuration attribute onto a ForwarderEnvironment's flat override leaves
+// (ADR-056). A nil attr overrides nothing; each non-zero leaf becomes a sparse
+// override the server resolves over the base definition on delivery.
+func applyForwarderConfigAttrToEnv(env *smplkit.ForwarderEnvironment, c *output.ForwarderHTTPConfigAttr) {
+	if c == nil {
+		return
 	}
-	return &cfg
+	env.URL = c.URL
+	env.Method = c.Method
+	env.SuccessStatus = c.SuccessStatus
+	env.TlsVerify = c.TLSVerify
+	env.CaCert = c.CACert
+	env.Headers = forwarderHeaderAttrsToMap(c.Headers)
 }
 
 // fileEnvsToModel converts the file shape's environments map into the
@@ -476,10 +486,24 @@ func fileEnvsToModel(envs map[string]forwarderEnvFileShape) map[string]smplkit.F
 	}
 	out := make(map[string]smplkit.ForwarderEnvironment, len(envs))
 	for k, e := range envs {
-		out[k] = smplkit.ForwarderEnvironment{
-			Enabled:       e.Enabled,
-			Configuration: fileEnvShapeToConfig(e.Configuration),
-		}
+		fe := smplkit.ForwarderEnvironment{Enabled: e.Enabled}
+		applyForwarderConfigAttrToEnv(&fe, e.Configuration)
+		out[k] = fe
+	}
+	return out
+}
+
+// forwarderEnvPointerMap converts the value-typed override map (used to build a
+// create via WithForwarderEnvironments) into the pointer-typed map the SDK's
+// Forwarder.Environments field holds, for the get-modify-write apply path.
+func forwarderEnvPointerMap(m map[string]smplkit.ForwarderEnvironment) map[string]*smplkit.ForwarderEnvironment {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]*smplkit.ForwarderEnvironment, len(m))
+	for k, v := range m {
+		v := v
+		out[k] = &v
 	}
 	return out
 }
@@ -495,44 +519,43 @@ func buildForwarderEnvironments(shape *forwarderFileShape, in forwarderInputs) (
 	if len(in.enableEnvs) == 0 && len(in.disableEnvs) == 0 {
 		return envs, nil
 	}
+	if err := validateEnvToggles(in.enableEnvs, in.disableEnvs); err != nil {
+		return nil, err
+	}
 	if envs == nil {
 		envs = make(map[string]smplkit.ForwarderEnvironment)
 	}
-	tmp := &smplkit.Forwarder{Environments: envs}
-	if err := applyEnvToggles(tmp, in.enableEnvs, in.disableEnvs); err != nil {
-		return nil, err
+	setEnabled := func(env string, enabled bool) {
+		cur := envs[env]
+		cur.Enabled = enabled
+		envs[env] = cur
 	}
-	return tmp.Environments, nil
+	for _, env := range in.enableEnvs {
+		setEnabled(env, true)
+	}
+	for _, env := range in.disableEnvs {
+		setEnabled(env, false)
+	}
+	return envs, nil
 }
 
 // applyEnvToggles flips the enabled bit for the named environments on a
 // forwarder's Environments map, preserving any existing per-environment
-// configuration override. --enable-env and --disable-env may not name
-// the same environment.
+// override. It reaches each entry via Environment(env), which lazily creates
+// the override (ADR-056). --enable-env and --disable-env may not name the
+// same environment.
 func applyEnvToggles(f *smplkit.Forwarder, enableEnvs, disableEnvs []string) error {
 	if len(enableEnvs) == 0 && len(disableEnvs) == 0 {
 		return nil
 	}
-	for _, e := range enableEnvs {
-		for _, d := range disableEnvs {
-			if e == d {
-				return fmt.Errorf("environment %q given to both --enable-env and --disable-env", e)
-			}
-		}
-	}
-	if f.Environments == nil {
-		f.Environments = make(map[string]smplkit.ForwarderEnvironment)
-	}
-	setEnabled := func(env string, enabled bool) {
-		cur := f.Environments[env]
-		cur.Enabled = enabled
-		f.Environments[env] = cur
+	if err := validateEnvToggles(enableEnvs, disableEnvs); err != nil {
+		return err
 	}
 	for _, env := range enableEnvs {
-		setEnabled(env, true)
+		f.Environment(env).Enabled = true
 	}
 	for _, env := range disableEnvs {
-		setEnabled(env, false)
+		f.Environment(env).Enabled = false
 	}
 	return nil
 }
@@ -548,7 +571,7 @@ func applyForwarderFileToModel(f *smplkit.Forwarder, shape *forwarderFileShape) 
 		f.Description = shape.Description
 	}
 	if shape.Environments != nil {
-		f.Environments = fileEnvsToModel(shape.Environments)
+		f.Environments = forwarderEnvPointerMap(fileEnvsToModel(shape.Environments))
 	}
 	if shape.Filter != nil {
 		f.Filter = shape.Filter
@@ -579,11 +602,7 @@ func applyForwarderFileToModel(f *smplkit.Forwarder, shape *forwarderFileShape) 
 			f.Configuration.CaCert = shape.Configuration.CACert
 		}
 		if shape.Configuration.Headers != nil {
-			f.Configuration.Headers = nil
-			for _, h := range shape.Configuration.Headers {
-				f.Configuration.Headers = append(f.Configuration.Headers,
-					smplkit.HttpHeader{Name: h.Name, Value: h.Value})
-			}
+			f.Configuration.Headers = forwarderHeaderAttrsToMap(shape.Configuration.Headers)
 		}
 	}
 }
@@ -659,9 +678,7 @@ func buildHTTPConfig(shape *forwarderFileShape, in forwarderInputs) (smplkit.Htt
 		cfg.SuccessStatus = shape.Configuration.SuccessStatus
 		cfg.TlsVerify = shape.Configuration.TLSVerify
 		cfg.CaCert = shape.Configuration.CACert
-		for _, h := range shape.Configuration.Headers {
-			cfg.Headers = append(cfg.Headers, smplkit.HttpHeader{Name: h.Name, Value: h.Value})
-		}
+		cfg.Headers = forwarderHeaderAttrsToMap(shape.Configuration.Headers)
 	}
 	if in.url != "" {
 		cfg.URL = in.url
@@ -685,17 +702,14 @@ func buildHTTPConfig(shape *forwarderFileShape, in forwarderInputs) (smplkit.Htt
 	return cfg, nil
 }
 
-func parseHeaders(raws []string) ([]smplkit.HttpHeader, error) {
-	out := make([]smplkit.HttpHeader, 0, len(raws))
+func parseHeaders(raws []string) (map[string]string, error) {
+	out := make(map[string]string, len(raws))
 	for _, raw := range raws {
 		eq := strings.Index(raw, "=")
 		if eq == -1 {
 			return nil, fmt.Errorf("--header must be key=value, got %q", raw)
 		}
-		out = append(out, smplkit.HttpHeader{
-			Name:  strings.TrimSpace(raw[:eq]),
-			Value: raw[eq+1:],
-		})
+		out[strings.TrimSpace(raw[:eq])] = raw[eq+1:]
 	}
 	return out, nil
 }

@@ -580,6 +580,18 @@ type ForwarderHeaderAttr struct {
 	Value string `json:"value" yaml:"value"`
 }
 
+// sortedHeaderNames returns a header map's keys in deterministic order. Since
+// ADR-056 the wire carries headers as an unordered object, so the CLI sorts
+// them by name to keep JSON/YAML output and table rendering stable across reads.
+func sortedHeaderNames(h map[string]string) []string {
+	names := make([]string, 0, len(h))
+	for name := range h {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // httpConfigToAttr projects an SDK HttpConfiguration onto its attribute
 // shape. Shared by the base configuration and per-environment overrides.
 func httpConfigToAttr(c smplkit.HttpConfiguration) ForwarderHTTPConfigAttr {
@@ -590,10 +602,32 @@ func httpConfigToAttr(c smplkit.HttpConfiguration) ForwarderHTTPConfigAttr {
 		TLSVerify:     c.TlsVerify,
 		CACert:        c.CaCert,
 	}
-	for _, h := range c.Headers {
-		cfg.Headers = append(cfg.Headers, ForwarderHeaderAttr{Name: h.Name, Value: h.Value})
+	for _, name := range sortedHeaderNames(c.Headers) {
+		cfg.Headers = append(cfg.Headers, ForwarderHeaderAttr{Name: name, Value: c.Headers[name]})
 	}
 	return cfg
+}
+
+// forwarderEnvLeavesToAttr reconstructs the CLI's nested per-environment
+// configuration attribute from a forwarder environment's flat override leaves
+// (ADR-056). Returns nil when the environment overrides no configuration leaf,
+// so an enablement-only override emits no `configuration` block.
+func forwarderEnvLeavesToAttr(e *smplkit.ForwarderEnvironment) *ForwarderHTTPConfigAttr {
+	if e.URL == "" && e.Method == "" && e.SuccessStatus == "" &&
+		e.TlsVerify == nil && e.CaCert == nil && len(e.Headers) == 0 {
+		return nil
+	}
+	cfg := ForwarderHTTPConfigAttr{
+		URL:           e.URL,
+		Method:        e.Method,
+		SuccessStatus: e.SuccessStatus,
+		TLSVerify:     e.TlsVerify,
+		CACert:        e.CaCert,
+	}
+	for _, name := range sortedHeaderNames(e.Headers) {
+		cfg.Headers = append(cfg.Headers, ForwarderHeaderAttr{Name: name, Value: e.Headers[name]})
+	}
+	return &cfg
 }
 
 // ForwarderToAttr projects a Forwarder.
@@ -603,10 +637,7 @@ func ForwarderToAttr(f *smplkit.Forwarder) ForwarderAttr {
 		envs = make(map[string]ForwarderEnvAttr, len(f.Environments))
 		for k, e := range f.Environments {
 			attr := ForwarderEnvAttr{Enabled: e.Enabled}
-			if e.Configuration != nil {
-				cfg := httpConfigToAttr(*e.Configuration)
-				attr.Configuration = &cfg
-			}
+			attr.Configuration = forwarderEnvLeavesToAttr(e)
 			envs[k] = attr
 		}
 	}
@@ -674,7 +705,7 @@ func (r Renderer) renderForwarderTable(fs []smplkit.Forwarder) error {
 
 // enabledEnvKeys returns the sorted environment keys whose entry is
 // enabled. A forwarder delivers only in these environments.
-func enabledEnvKeys(m map[string]smplkit.ForwarderEnvironment) []string {
+func enabledEnvKeys(m map[string]*smplkit.ForwarderEnvironment) []string {
 	if len(m) == 0 {
 		return nil
 	}
@@ -779,10 +810,34 @@ func jobHTTPConfigToAttr(c smplkit.HttpConfig) JobHTTPConfigAttr {
 		TLSVerify:     c.TlsVerify,
 		CACert:        c.CaCert,
 	}
-	for _, h := range c.Headers {
-		cfg.Headers = append(cfg.Headers, JobHeaderAttr{Name: h.Name, Value: h.Value})
+	for _, name := range sortedHeaderNames(c.Headers) {
+		cfg.Headers = append(cfg.Headers, JobHeaderAttr{Name: name, Value: c.Headers[name]})
 	}
 	return cfg
+}
+
+// jobEnvLeavesToAttr reconstructs the CLI's nested per-environment
+// configuration attribute from a job environment's flat override leaves
+// (ADR-056). Returns nil when the environment overrides no configuration leaf,
+// so an enablement-only override emits no `configuration` block.
+func jobEnvLeavesToAttr(e *smplkit.JobEnvironment) *JobHTTPConfigAttr {
+	if e.URL == "" && e.Method == "" && e.SuccessStatus == "" && e.Timeout == 0 &&
+		e.Body == nil && e.TlsVerify == nil && e.CaCert == nil && len(e.Headers) == 0 {
+		return nil
+	}
+	cfg := JobHTTPConfigAttr{
+		URL:           e.URL,
+		Method:        string(e.Method),
+		Body:          e.Body,
+		SuccessStatus: e.SuccessStatus,
+		Timeout:       e.Timeout,
+		TLSVerify:     e.TlsVerify,
+		CACert:        e.CaCert,
+	}
+	for _, name := range sortedHeaderNames(e.Headers) {
+		cfg.Headers = append(cfg.Headers, JobHeaderAttr{Name: name, Value: e.Headers[name]})
+	}
+	return &cfg
 }
 
 // JobToAttr projects a smplkit.Job onto its attribute shape.
@@ -791,7 +846,7 @@ func JobToAttr(j *smplkit.Job) JobAttr {
 		ID:                j.ID,
 		Name:              j.Name,
 		Description:       j.Description,
-		Enabled:           j.Enabled,
+		Enabled:           j.Enabled(),
 		Kind:              j.Kind,
 		Type:              j.Type,
 		Schedule:          j.Schedule,
@@ -807,15 +862,12 @@ func JobToAttr(j *smplkit.Job) JobAttr {
 		envs := make(map[string]JobEnvAttr, len(j.Environments))
 		for k, e := range j.Environments {
 			ea := JobEnvAttr{
-				Enabled:     e.Enabled,
-				Schedule:    e.Schedule,
-				Timezone:    e.Timezone,
-				RetryPolicy: e.RetryPolicy,
-				NextRunAt:   e.NextRunAt,
-			}
-			if e.Configuration != nil {
-				c := jobHTTPConfigToAttr(*e.Configuration)
-				ea.Configuration = &c
+				Enabled:       e.Enabled,
+				Schedule:      e.Schedule,
+				Timezone:      e.Timezone,
+				RetryPolicy:   e.RetryPolicy,
+				NextRunAt:     e.NextRunAt,
+				Configuration: jobEnvLeavesToAttr(e),
 			}
 			envs[k] = ea
 		}
@@ -878,7 +930,7 @@ func (r Renderer) renderJobTable(js []*smplkit.Job) error {
 
 // enabledJobEnvKeys returns the sorted environment keys in which the job is
 // enabled. A recurring job fires only in these environments.
-func enabledJobEnvKeys(m map[string]smplkit.JobEnvironment) []string {
+func enabledJobEnvKeys(m map[string]*smplkit.JobEnvironment) []string {
 	if len(m) == 0 {
 		return nil
 	}
@@ -905,35 +957,40 @@ type RetryPolicyAttr struct {
 	DelaySeconds int             `json:"delay_seconds" yaml:"delay_seconds"`
 	// MaxDelaySeconds caps the wait between retries (exponential backoff only).
 	// Omitted when nil (uncapped).
-	MaxDelaySeconds *int        `json:"max_delay_seconds,omitempty" yaml:"max_delay_seconds,omitempty"`
-	RetryOn         RetryOnAttr `json:"retry_on" yaml:"retry_on"`
-	CreatedAt       *time.Time  `json:"created_at,omitempty" yaml:"created_at,omitempty"`
-	UpdatedAt       *time.Time  `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
-	Version         *int        `json:"version,omitempty" yaml:"version,omitempty"`
-}
-
-// RetryOnAttr is the JSON/YAML shape for which failures a policy retries.
-type RetryOnAttr struct {
-	Statuses []int                 `json:"statuses,omitempty" yaml:"statuses,omitempty"`
-	Reasons  []smplkit.RetryReason `json:"reasons,omitempty" yaml:"reasons,omitempty"`
+	MaxDelaySeconds *int `json:"max_delay_seconds,omitempty" yaml:"max_delay_seconds,omitempty"`
+	// RetryOnTimeout retries a run that failed because the request did not
+	// complete within the job's timeout.
+	RetryOnTimeout bool `json:"retry_on_timeout" yaml:"retry_on_timeout"`
+	// RetryOnConnectionError retries a run that failed because the destination
+	// could not be reached (DNS, connection refused, TLS, or transport error).
+	RetryOnConnectionError bool `json:"retry_on_connection_error" yaml:"retry_on_connection_error"`
+	// RetryStatuses is the allowlist of response status patterns to retry — each
+	// an exact 3-digit code ("429") or a class ("5xx").
+	RetryStatuses []string `json:"retry_statuses,omitempty" yaml:"retry_statuses,omitempty"`
+	// RetryStatusesExcept subtracts from RetryStatuses, using the same exact-code
+	// or class syntax — a status matching both lists is not retried.
+	RetryStatusesExcept []string   `json:"retry_statuses_except,omitempty" yaml:"retry_statuses_except,omitempty"`
+	CreatedAt           *time.Time `json:"created_at,omitempty" yaml:"created_at,omitempty"`
+	UpdatedAt           *time.Time `json:"updated_at,omitempty" yaml:"updated_at,omitempty"`
+	Version             *int       `json:"version,omitempty" yaml:"version,omitempty"`
 }
 
 // RetryPolicyToAttr projects a smplkit.RetryPolicy onto its attribute shape.
 func RetryPolicyToAttr(p *smplkit.RetryPolicy) RetryPolicyAttr {
 	return RetryPolicyAttr{
-		ID:              p.ID,
-		Name:            p.Name,
-		MaxRetries:      p.MaxRetries,
-		Backoff:         p.Backoff,
-		DelaySeconds:    p.DelaySeconds,
-		MaxDelaySeconds: p.MaxDelaySeconds,
-		RetryOn: RetryOnAttr{
-			Statuses: p.RetryOn.Statuses,
-			Reasons:  p.RetryOn.Reasons,
-		},
-		CreatedAt: p.CreatedAt,
-		UpdatedAt: p.UpdatedAt,
-		Version:   p.Version,
+		ID:                     p.ID,
+		Name:                   p.Name,
+		MaxRetries:             p.MaxRetries,
+		Backoff:                p.Backoff,
+		DelaySeconds:           p.DelaySeconds,
+		MaxDelaySeconds:        p.MaxDelaySeconds,
+		RetryOnTimeout:         p.RetryOnTimeout,
+		RetryOnConnectionError: p.RetryOnConnectionError,
+		RetryStatuses:          p.RetryStatuses,
+		RetryStatusesExcept:    p.RetryStatusesExcept,
+		CreatedAt:              p.CreatedAt,
+		UpdatedAt:              p.UpdatedAt,
+		Version:                p.Version,
 	}
 }
 

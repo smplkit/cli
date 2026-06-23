@@ -43,11 +43,11 @@ func TestParseHeaders(t *testing.T) {
 	if len(hdrs) != 2 {
 		t.Fatalf("got %d, want 2", len(hdrs))
 	}
-	if hdrs[0].Name != "DD-API-KEY" || hdrs[0].Value != "secret" {
-		t.Errorf("hdrs[0] = %+v", hdrs[0])
+	if hdrs["DD-API-KEY"] != "secret" {
+		t.Errorf("DD-API-KEY = %q", hdrs["DD-API-KEY"])
 	}
-	if hdrs[1].Name != "X-Source" || hdrs[1].Value != "cli=test" {
-		t.Errorf("hdrs[1] = %+v (values must keep additional = chars)", hdrs[1])
+	if hdrs["X-Source"] != "cli=test" {
+		t.Errorf("X-Source = %q (values must keep additional = chars)", hdrs["X-Source"])
 	}
 	if _, err := parseHeaders([]string{"nokv"}); err == nil {
 		t.Error("expected error for missing =")
@@ -115,28 +115,27 @@ func TestApplyForwarderFileToModel_PerEnvConfigOverride(t *testing.T) {
 	if !ok || !prod.Enabled {
 		t.Fatalf("production env missing/disabled: %+v", fwd.Environments)
 	}
-	if prod.Configuration == nil {
-		t.Fatal("per-env configuration override should be set")
+	// Per-environment overrides are now flat leaves on the environment (ADR-056),
+	// not a nested Configuration object.
+	if prod.URL != "https://prod.example.com/ingest" {
+		t.Errorf("url: %q", prod.URL)
 	}
-	if prod.Configuration.URL != "https://prod.example.com/ingest" {
-		t.Errorf("url: %q", prod.Configuration.URL)
+	if prod.Method != "PUT" || prod.SuccessStatus != "2xx" {
+		t.Errorf("method/status: %+v", prod)
 	}
-	if prod.Configuration.Method != "PUT" || prod.Configuration.SuccessStatus != "2xx" {
-		t.Errorf("method/status: %+v", prod.Configuration)
+	if prod.TlsVerify == nil || *prod.TlsVerify {
+		t.Errorf("tls_verify should be false: %+v", prod.TlsVerify)
 	}
-	if prod.Configuration.TlsVerify == nil || *prod.Configuration.TlsVerify {
-		t.Errorf("tls_verify should be false: %+v", prod.Configuration.TlsVerify)
-	}
-	if len(prod.Configuration.Headers) != 1 || prod.Configuration.Headers[0].Name != "X-Env" {
-		t.Errorf("headers: %+v", prod.Configuration.Headers)
+	if len(prod.Headers) != 1 || prod.Headers["X-Env"] != "prod" {
+		t.Errorf("headers: %+v", prod.Headers)
 	}
 }
 
 func TestApplyEnvToggles_EnableDisablePreservingConfig(t *testing.T) {
 	url := "https://override.example.com"
 	fwd := &smplkit.Forwarder{
-		Environments: map[string]smplkit.ForwarderEnvironment{
-			"production": {Enabled: false, Configuration: &smplkit.HttpConfiguration{URL: url}},
+		Environments: map[string]*smplkit.ForwarderEnvironment{
+			"production": {Enabled: false, URL: url},
 		},
 	}
 	if err := applyEnvToggles(fwd, []string{"production", "staging"}, []string{"dev"}); err != nil {
@@ -146,8 +145,8 @@ func TestApplyEnvToggles_EnableDisablePreservingConfig(t *testing.T) {
 	if !prod.Enabled {
 		t.Error("production should be enabled")
 	}
-	if prod.Configuration == nil || prod.Configuration.URL != url {
-		t.Errorf("production config override must be preserved: %+v", prod.Configuration)
+	if prod.URL != url {
+		t.Errorf("production override leaf must be preserved: %+v", prod)
 	}
 	if !fwd.Environments["staging"].Enabled {
 		t.Error("staging should be enabled (new entry)")

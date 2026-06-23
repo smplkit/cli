@@ -18,20 +18,19 @@ import (
 // The read-only server fields (created_at, updated_at, version) carried by a
 // `get -o json` snapshot are absent here: they are ignored on replay.
 type retryPolicyFileShape struct {
-	ID              string            `json:"id,omitempty"`
-	Name            string            `json:"name,omitempty"`
-	MaxRetries      *int              `json:"max_retries,omitempty"`
-	Backoff         string            `json:"backoff,omitempty"`
-	DelaySeconds    *int              `json:"delay_seconds,omitempty"`
-	MaxDelaySeconds *int              `json:"max_delay_seconds,omitempty"`
-	RetryOn         *retryOnFileShape `json:"retry_on,omitempty"`
-}
-
-// retryOnFileShape is the file representation of the RetryOn payload: the
-// status codes and failure reasons a policy retries.
-type retryOnFileShape struct {
-	Statuses []int    `json:"statuses,omitempty"`
-	Reasons  []string `json:"reasons,omitempty"`
+	ID              string `json:"id,omitempty"`
+	Name            string `json:"name,omitempty"`
+	MaxRetries      *int   `json:"max_retries,omitempty"`
+	Backoff         string `json:"backoff,omitempty"`
+	DelaySeconds    *int   `json:"delay_seconds,omitempty"`
+	MaxDelaySeconds *int   `json:"max_delay_seconds,omitempty"`
+	// RetryOnTimeout / RetryOnConnectionError are pointers so an absent field in
+	// an apply -f file means "leave the server value untouched" rather than
+	// "set false".
+	RetryOnTimeout         *bool    `json:"retry_on_timeout,omitempty"`
+	RetryOnConnectionError *bool    `json:"retry_on_connection_error,omitempty"`
+	RetryStatuses          []string `json:"retry_statuses,omitempty"`
+	RetryStatusesExcept    []string `json:"retry_statuses_except,omitempty"`
 }
 
 func registerRetryPolicyCmd(root *cobra.Command) {
@@ -147,8 +146,10 @@ func retryPolicyCreateCmd() *cobra.Command {
 			"--delay-seconds for the simple case, or -f policy.json (produced by\n" +
 			"`smplkit retry-policy get -o json`) to round-trip a full definition.\n" +
 			"Scalar flags override file values where both are supplied. --retry-status\n" +
-			"(repeatable) and --retry-reason (repeatable) set which failures to retry.\n" +
-			"--max-delay-seconds caps the wait for exponential backoff only.",
+			"and --retry-status-except (repeatable; exact codes like 429 or classes like\n" +
+			"5xx) plus --retry-on-timeout and --retry-on-connection-error set which\n" +
+			"failures to retry. --max-delay-seconds caps the wait for exponential backoff\n" +
+			"only.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
@@ -188,8 +189,8 @@ func retryPolicyApplyCmd() *cobra.Command {
 			"pass is preserved from the server) and PUT it back; if it does not exist,\n" +
 			"create it. Safe to run repeatedly — re-running with the same flags is a\n" +
 			"no-op, and changing a flag reconciles drift. Note: --retry-status and\n" +
-			"--retry-reason each set the COMPLETE list, so re-supply every value you\n" +
-			"want to keep. Built for scheduled CI keeping a policy in a desired state.",
+			"--retry-status-except each set the COMPLETE list, so re-supply every value\n" +
+			"you want to keep. Built for scheduled CI keeping a policy in a desired state.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			id := args[0]
@@ -269,22 +270,26 @@ func retryPolicyDeleteCmd() *cobra.Command {
 // which were explicitly set, so the apply (read-modify-write) path leaves
 // unspecified fields untouched and create can fall back to the -f file.
 type retryPolicyInputs struct {
-	name            string
-	maxRetries      int
-	backoff         string
-	delaySeconds    int
-	maxDelaySeconds int
-	retryStatuses   []int
-	retryReasons    []string
-	file            string
+	name                   string
+	maxRetries             int
+	backoff                string
+	delaySeconds           int
+	maxDelaySeconds        int
+	retryStatuses          []string
+	retryStatusesExcept    []string
+	retryOnTimeout         bool
+	retryOnConnectionError bool
+	file                   string
 
-	nameSet            bool
-	maxRetriesSet      bool
-	backoffSet         bool
-	delaySecondsSet    bool
-	maxDelaySecondsSet bool
-	retryStatusesSet   bool
-	retryReasonsSet    bool
+	nameSet                   bool
+	maxRetriesSet             bool
+	backoffSet                bool
+	delaySecondsSet           bool
+	maxDelaySecondsSet        bool
+	retryStatusesSet          bool
+	retryStatusesExceptSet    bool
+	retryOnTimeoutSet         bool
+	retryOnConnectionErrorSet bool
 }
 
 func addRetryPolicyScalarFlags(cmd *cobra.Command, in *retryPolicyInputs) {
@@ -293,8 +298,10 @@ func addRetryPolicyScalarFlags(cmd *cobra.Command, in *retryPolicyInputs) {
 	cmd.Flags().StringVar(&in.backoff, "backoff", string(smplkit.BackoffExponential), "how the wait between retries grows: exponential|fixed")
 	cmd.Flags().IntVar(&in.delaySeconds, "delay-seconds", 0, "wait before a retry (constant for fixed; base that doubles each retry for exponential)")
 	cmd.Flags().IntVar(&in.maxDelaySeconds, "max-delay-seconds", 0, "ceiling on the wait between retries (exponential backoff only)")
-	cmd.Flags().IntSliceVar(&in.retryStatuses, "retry-status", nil, "response status code to retry (repeatable): --retry-status 429 --retry-status 503")
-	cmd.Flags().StringArrayVar(&in.retryReasons, "retry-reason", nil, "failure category to retry (repeatable): CONNECTION_ERROR|NON_SUCCESS_STATUS|TIMEOUT")
+	cmd.Flags().StringArrayVar(&in.retryStatuses, "retry-status", nil, "response status pattern to retry (repeatable): an exact code (429) or a class (5xx): --retry-status 429 --retry-status 5xx")
+	cmd.Flags().StringArrayVar(&in.retryStatusesExcept, "retry-status-except", nil, "response status pattern to exclude from --retry-status (repeatable, same syntax): --retry-status 5xx --retry-status-except 501")
+	cmd.Flags().BoolVar(&in.retryOnTimeout, "retry-on-timeout", false, "retry a run that failed because the request exceeded the job's timeout")
+	cmd.Flags().BoolVar(&in.retryOnConnectionError, "retry-on-connection-error", false, "retry a run that failed because the destination could not be reached (DNS, connection refused, TLS, transport)")
 	cmd.Flags().StringVarP(&in.file, "file", "f", "", "load definition from JSON file (round-trips `get -o json`)")
 }
 
@@ -307,7 +314,9 @@ func (in *retryPolicyInputs) readChanged(cmd *cobra.Command) {
 	in.delaySecondsSet = cmd.Flags().Changed("delay-seconds")
 	in.maxDelaySecondsSet = cmd.Flags().Changed("max-delay-seconds")
 	in.retryStatusesSet = cmd.Flags().Changed("retry-status")
-	in.retryReasonsSet = cmd.Flags().Changed("retry-reason")
+	in.retryStatusesExceptSet = cmd.Flags().Changed("retry-status-except")
+	in.retryOnTimeoutSet = cmd.Flags().Changed("retry-on-timeout")
+	in.retryOnConnectionErrorSet = cmd.Flags().Changed("retry-on-connection-error")
 }
 
 // buildRetryPolicyForCreate assembles a fresh, unsaved *RetryPolicy from the
@@ -359,40 +368,52 @@ func buildRetryPolicyForCreate(ns *smplkit.RetryPoliciesClient, id string, shape
 		opts = append(opts, smplkit.WithRetryPolicyMaxDelaySeconds(*shape.MaxDelaySeconds))
 	}
 
-	retryOn, rerr := buildRetryOn(shape, in)
-	if rerr != nil {
-		return nil, rerr
+	// Retry conditions: each scalar flag replaces the -f file's value where
+	// supplied. Status patterns and the two boolean conditions are independent.
+	effRetryStatuses := in.retryStatuses
+	if !in.retryStatusesSet && shape != nil {
+		effRetryStatuses = shape.RetryStatuses
 	}
-	if len(retryOn.Statuses) > 0 || len(retryOn.Reasons) > 0 {
-		opts = append(opts, smplkit.WithRetryPolicyRetryOn(retryOn))
+	if len(effRetryStatuses) > 0 {
+		opts = append(opts, smplkit.WithRetryPolicyRetryStatuses(effRetryStatuses))
+	}
+
+	effRetryStatusesExcept := in.retryStatusesExcept
+	if !in.retryStatusesExceptSet && shape != nil {
+		effRetryStatusesExcept = shape.RetryStatusesExcept
+	}
+	if len(effRetryStatusesExcept) > 0 {
+		opts = append(opts, smplkit.WithRetryPolicyRetryStatusesExcept(effRetryStatusesExcept))
+	}
+
+	if pickRetryBool(in.retryOnTimeoutSet, in.retryOnTimeout, shapeBool(shape, func(s *retryPolicyFileShape) *bool { return s.RetryOnTimeout })) {
+		opts = append(opts, smplkit.WithRetryPolicyRetryOnTimeout(true))
+	}
+	if pickRetryBool(in.retryOnConnectionErrorSet, in.retryOnConnectionError, shapeBool(shape, func(s *retryPolicyFileShape) *bool { return s.RetryOnConnectionError })) {
+		opts = append(opts, smplkit.WithRetryPolicyRetryOnConnectionError(true))
 	}
 
 	return ns.New(id, effName, effMaxRetries, backoff, effDelaySeconds, opts...), nil
 }
 
-// buildRetryOn assembles the RetryOn payload from the -f file plus the scalar
-// flags. Scalar flags replace the file's lists entirely where supplied.
-func buildRetryOn(shape *retryPolicyFileShape, in retryPolicyInputs) (smplkit.RetryOn, error) {
-	out := smplkit.RetryOn{}
-	if shape != nil && shape.RetryOn != nil {
-		out.Statuses = append([]int(nil), shape.RetryOn.Statuses...)
-		reasons, err := parseRetryReasons(shape.RetryOn.Reasons)
-		if err != nil {
-			return out, err
-		}
-		out.Reasons = reasons
+// pickRetryBool resolves a boolean retry condition for create: the scalar flag
+// wins when supplied, otherwise the -f file value (nil → false).
+func pickRetryBool(flagSet, flagVal bool, fileVal *bool) bool {
+	if flagSet {
+		return flagVal
 	}
-	if in.retryStatusesSet {
-		out.Statuses = append([]int(nil), in.retryStatuses...)
+	if fileVal != nil {
+		return *fileVal
 	}
-	if in.retryReasonsSet {
-		reasons, err := parseRetryReasons(in.retryReasons)
-		if err != nil {
-			return out, err
-		}
-		out.Reasons = reasons
+	return false
+}
+
+// shapeBool safely reads a *bool field off a possibly-nil file shape.
+func shapeBool(shape *retryPolicyFileShape, get func(*retryPolicyFileShape) *bool) *bool {
+	if shape == nil {
+		return nil
 	}
-	return out, nil
+	return get(shape)
 }
 
 // applyRetryPolicyInputsToModel mutates an existing policy (fetched via Get) in
@@ -431,14 +452,16 @@ func applyRetryPolicyInputsToModel(policy *smplkit.RetryPolicy, shape *retryPoli
 		}
 	}
 	if in.retryStatusesSet {
-		policy.RetryOn.Statuses = append([]int(nil), in.retryStatuses...)
+		policy.RetryStatuses = append([]string(nil), in.retryStatuses...)
 	}
-	if in.retryReasonsSet {
-		reasons, err := parseRetryReasons(in.retryReasons)
-		if err != nil {
-			return err
-		}
-		policy.RetryOn.Reasons = reasons
+	if in.retryStatusesExceptSet {
+		policy.RetryStatusesExcept = append([]string(nil), in.retryStatusesExcept...)
+	}
+	if in.retryOnTimeoutSet {
+		policy.RetryOnTimeout = in.retryOnTimeout
+	}
+	if in.retryOnConnectionErrorSet {
+		policy.RetryOnConnectionError = in.retryOnConnectionError
 	}
 	return nil
 }
@@ -466,13 +489,17 @@ func applyRetryPolicyFileToModel(policy *smplkit.RetryPolicy, shape *retryPolicy
 		v := *shape.MaxDelaySeconds
 		policy.MaxDelaySeconds = &v
 	}
-	if shape.RetryOn != nil {
-		policy.RetryOn.Statuses = append([]int(nil), shape.RetryOn.Statuses...)
-		reasons, err := parseRetryReasons(shape.RetryOn.Reasons)
-		if err != nil {
-			return err
-		}
-		policy.RetryOn.Reasons = reasons
+	if shape.RetryStatuses != nil {
+		policy.RetryStatuses = append([]string(nil), shape.RetryStatuses...)
+	}
+	if shape.RetryStatusesExcept != nil {
+		policy.RetryStatusesExcept = append([]string(nil), shape.RetryStatusesExcept...)
+	}
+	if shape.RetryOnTimeout != nil {
+		policy.RetryOnTimeout = *shape.RetryOnTimeout
+	}
+	if shape.RetryOnConnectionError != nil {
+		policy.RetryOnConnectionError = *shape.RetryOnConnectionError
 	}
 	return nil
 }
@@ -510,33 +537,4 @@ func parseBackoff(raw string) (smplkit.Backoff, error) {
 	default:
 		return "", fmt.Errorf("invalid --backoff %q (expected exponential|fixed)", raw)
 	}
-}
-
-// parseRetryReason normalizes and validates a single --retry-reason value.
-func parseRetryReason(raw string) (smplkit.RetryReason, error) {
-	switch r := smplkit.RetryReason(strings.ToUpper(strings.TrimSpace(raw))); r {
-	case smplkit.RetryReasonConnectionError,
-		smplkit.RetryReasonNonSuccessStatus,
-		smplkit.RetryReasonTimeout:
-		return r, nil
-	default:
-		return "", fmt.Errorf("invalid --retry-reason %q (expected CONNECTION_ERROR|NON_SUCCESS_STATUS|TIMEOUT)", raw)
-	}
-}
-
-// parseRetryReasons validates a list of --retry-reason values. A nil/empty
-// input yields a nil slice (retries nothing).
-func parseRetryReasons(raws []string) ([]smplkit.RetryReason, error) {
-	if len(raws) == 0 {
-		return nil, nil
-	}
-	out := make([]smplkit.RetryReason, 0, len(raws))
-	for _, raw := range raws {
-		r, err := parseRetryReason(raw)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, r)
-	}
-	return out, nil
 }

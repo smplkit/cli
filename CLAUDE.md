@@ -39,8 +39,15 @@ make check     # build + vet + lint + tests — the CI gate
 make accept    # ACC=1 go test ./acceptance/... against the local platform
 ```
 
-`make accept` requires the local platform (ADR-042) running and a
-`SMPLKIT_API_KEY` valid against it.
+`make accept` requires the local platform (ADR-042) running. It is
+**destructive** — it deletes the authenticating account's seeded
+`development` environment to free a managed slot — so it must run as a
+dedicated, isolated throwaway account, never your dev/preview account.
+The target sources `SMPLKIT_API_KEY` from the `[local-acceptance]`
+profile in `~/.smplkit` (or an already-set env var); provision that
+profile once with `python3
+~/projects/.github/platform/seed-acceptance-account.py`. See
+`~/projects/.github/docs/local-testing.md` for the full story.
 
 ## Conventions
 

@@ -634,7 +634,11 @@ func buildJobForCreate(ns *smplkit.JobsClient, id string, shape *jobFileShape, i
 
 	job := newJobForSchedule(ns, id, effName, effSchedule, cfg, opts...)
 	if effTimezone != "" {
-		job.SetTimezone(effTimezone)
+		// `timezone` has no SDK constructor option, so set the base timezone
+		// directly when supplied; the SetTimezone(env) accessor was removed in
+		// the ADR-056 reshape. The post-Save read writes back the
+		// server-authoritative value.
+		job.Timezone = effTimezone
 	}
 	return job, nil
 }
@@ -659,25 +663,35 @@ func newJobForSchedule(ns *smplkit.JobsClient, id, name, schedule string, cfg sm
 	}
 }
 
-// jobEnvShapeToConfig converts the file/CLI HTTP-config attribute shape
-// into the SDK's HttpConfig used for per-environment overrides.
-func jobEnvShapeToConfig(c *output.JobHTTPConfigAttr) *smplkit.HttpConfig {
-	if c == nil {
+// jobHeaderAttrsToMap converts the CLI's ordered header-attribute list into the
+// SDK's name→value header map (ADR-056). Returns nil for an empty list.
+func jobHeaderAttrsToMap(hs []output.JobHeaderAttr) map[string]string {
+	if len(hs) == 0 {
 		return nil
 	}
-	cfg := smplkit.HttpConfig{
-		URL:           c.URL,
-		Method:        smplkit.JobHttpMethod(c.Method),
-		SuccessStatus: c.SuccessStatus,
-		Timeout:       c.Timeout,
-		Body:          c.Body,
-		TlsVerify:     c.TLSVerify,
-		CaCert:        c.CACert,
+	out := make(map[string]string, len(hs))
+	for _, h := range hs {
+		out[h.Name] = h.Value
 	}
-	for _, h := range c.Headers {
-		cfg.Headers = append(cfg.Headers, smplkit.HttpHeader{Name: h.Name, Value: h.Value})
+	return out
+}
+
+// applyJobConfigAttrToEnv flattens the CLI's nested per-environment
+// configuration attribute onto a JobEnvironment's flat override leaves
+// (ADR-056). A nil attr overrides nothing; each non-zero leaf becomes a
+// sparse override the server resolves over the base definition.
+func applyJobConfigAttrToEnv(env *smplkit.JobEnvironment, c *output.JobHTTPConfigAttr) {
+	if c == nil {
+		return
 	}
-	return &cfg
+	env.URL = c.URL
+	env.Method = smplkit.JobHttpMethod(c.Method)
+	env.SuccessStatus = c.SuccessStatus
+	env.Timeout = c.Timeout
+	env.Body = c.Body
+	env.TlsVerify = c.TLSVerify
+	env.CaCert = c.CACert
+	env.Headers = jobHeaderAttrsToMap(c.Headers)
 }
 
 // jobEnvFileToModel converts the file shape's environments map into the
@@ -688,13 +702,29 @@ func jobEnvFileToModel(envs map[string]jobEnvFileShape) map[string]smplkit.JobEn
 	}
 	out := make(map[string]smplkit.JobEnvironment, len(envs))
 	for k, e := range envs {
-		out[k] = smplkit.JobEnvironment{
-			Enabled:       e.Enabled,
-			Schedule:      e.Schedule,
-			Timezone:      e.Timezone,
-			RetryPolicy:   e.RetryPolicy,
-			Configuration: jobEnvShapeToConfig(e.Configuration),
+		je := smplkit.JobEnvironment{
+			Enabled:     e.Enabled,
+			Schedule:    e.Schedule,
+			Timezone:    e.Timezone,
+			RetryPolicy: e.RetryPolicy,
 		}
+		applyJobConfigAttrToEnv(&je, e.Configuration)
+		out[k] = je
+	}
+	return out
+}
+
+// jobEnvPointerMap converts the value-typed override map (used to build a
+// create via WithJobEnvironments) into the pointer-typed map the SDK's
+// Job.Environments field holds, for the get-modify-write apply path.
+func jobEnvPointerMap(m map[string]smplkit.JobEnvironment) map[string]*smplkit.JobEnvironment {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]*smplkit.JobEnvironment, len(m))
+	for k, v := range m {
+		v := v
+		out[k] = &v
 	}
 	return out
 }
@@ -710,24 +740,29 @@ func buildJobEnvironments(shape *jobFileShape, in jobInputs) (map[string]smplkit
 	if len(in.enableEnvs) == 0 && len(in.disableEnvs) == 0 {
 		return envs, nil
 	}
+	if err := validateEnvToggles(in.enableEnvs, in.disableEnvs); err != nil {
+		return nil, err
+	}
 	if envs == nil {
 		envs = make(map[string]smplkit.JobEnvironment)
 	}
-	tmp := &smplkit.Job{Environments: envs}
-	if err := applyJobEnvToggles(tmp, in.enableEnvs, in.disableEnvs); err != nil {
-		return nil, err
+	setEnabled := func(env string, enabled bool) {
+		cur := envs[env]
+		cur.Enabled = enabled
+		envs[env] = cur
 	}
-	return tmp.Environments, nil
+	for _, env := range in.enableEnvs {
+		setEnabled(env, true)
+	}
+	for _, env := range in.disableEnvs {
+		setEnabled(env, false)
+	}
+	return envs, nil
 }
 
-// applyJobEnvToggles flips the enabled bit for the named environments on a
-// job's Environments map, preserving any existing per-environment
-// configuration override. --enable-env and --disable-env may not name the
-// same environment.
-func applyJobEnvToggles(job *smplkit.Job, enableEnvs, disableEnvs []string) error {
-	if len(enableEnvs) == 0 && len(disableEnvs) == 0 {
-		return nil
-	}
+// validateEnvToggles rejects an environment named in both --enable-env and
+// --disable-env. Shared by the job and forwarder toggle helpers.
+func validateEnvToggles(enableEnvs, disableEnvs []string) error {
 	for _, e := range enableEnvs {
 		for _, d := range disableEnvs {
 			if e == d {
@@ -735,19 +770,26 @@ func applyJobEnvToggles(job *smplkit.Job, enableEnvs, disableEnvs []string) erro
 			}
 		}
 	}
-	if job.Environments == nil {
-		job.Environments = make(map[string]smplkit.JobEnvironment)
+	return nil
+}
+
+// applyJobEnvToggles flips the enabled bit for the named environments on a
+// job's Environments map, preserving any existing per-environment override.
+// It reaches each entry via Environment(env), which lazily creates the
+// override (ADR-056). --enable-env and --disable-env may not name the same
+// environment.
+func applyJobEnvToggles(job *smplkit.Job, enableEnvs, disableEnvs []string) error {
+	if len(enableEnvs) == 0 && len(disableEnvs) == 0 {
+		return nil
 	}
-	setEnabled := func(env string, enabled bool) {
-		cur := job.Environments[env]
-		cur.Enabled = enabled
-		job.Environments[env] = cur
+	if err := validateEnvToggles(enableEnvs, disableEnvs); err != nil {
+		return err
 	}
 	for _, env := range enableEnvs {
-		setEnabled(env, true)
+		job.Environment(env).Enabled = true
 	}
 	for _, env := range disableEnvs {
-		setEnabled(env, false)
+		job.Environment(env).Enabled = false
 	}
 	return nil
 }
@@ -766,9 +808,7 @@ func buildJobHTTPConfig(shape *jobFileShape, in jobInputs) (smplkit.HttpConfig, 
 		cfg.Body = c.Body
 		cfg.TlsVerify = c.TLSVerify
 		cfg.CaCert = c.CACert
-		for _, h := range c.Headers {
-			cfg.Headers = append(cfg.Headers, smplkit.HttpHeader{Name: h.Name, Value: h.Value})
-		}
+		cfg.Headers = jobHeaderAttrsToMap(c.Headers)
 	}
 
 	if in.urlSet {
@@ -862,7 +902,7 @@ func applyJobFileToModel(job *smplkit.Job, shape *jobFileShape) {
 		job.Description = shape.Description
 	}
 	if shape.Environments != nil {
-		job.Environments = jobEnvFileToModel(shape.Environments)
+		job.Environments = jobEnvPointerMap(jobEnvFileToModel(shape.Environments))
 	}
 	if shape.Schedule != "" {
 		job.Schedule = shape.Schedule
@@ -900,11 +940,7 @@ func applyJobFileToModel(job *smplkit.Job, shape *jobFileShape) {
 			job.Configuration.CaCert = c.CACert
 		}
 		if c.Headers != nil {
-			job.Configuration.Headers = nil
-			for _, h := range c.Headers {
-				job.Configuration.Headers = append(job.Configuration.Headers,
-					smplkit.HttpHeader{Name: h.Name, Value: h.Value})
-			}
+			job.Configuration.Headers = jobHeaderAttrsToMap(c.Headers)
 		}
 	}
 }
@@ -927,8 +963,8 @@ func loadJobFile(path string) (*jobFileShape, error) {
 // parseJobHeaders parses repeatable "Name: Value" header flags into the
 // SDK's header slice, splitting on the first colon so values may contain
 // colons (e.g. "Authorization: Bearer abc:def").
-func parseJobHeaders(raws []string) ([]smplkit.HttpHeader, error) {
-	out := make([]smplkit.HttpHeader, 0, len(raws))
+func parseJobHeaders(raws []string) (map[string]string, error) {
+	out := make(map[string]string, len(raws))
 	for _, raw := range raws {
 		colon := strings.Index(raw, ":")
 		if colon == -1 {
@@ -939,7 +975,7 @@ func parseJobHeaders(raws []string) ([]smplkit.HttpHeader, error) {
 		if name == "" {
 			return nil, fmt.Errorf("--header has an empty name: %q", raw)
 		}
-		out = append(out, smplkit.HttpHeader{Name: name, Value: value})
+		out[name] = value
 	}
 	return out, nil
 }
