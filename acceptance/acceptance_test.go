@@ -3,10 +3,22 @@
 // environment variable so a stray `go test ./...` doesn't try to hit
 // the platform.
 //
-// These tests do not run in this repo's CI; CLI acceptance runs from
-// the smplkit/e2e repo against the production platform. Run them
-// locally via `make accept` from a shell that already has the platform
-// up (~/projects/.github/platform/start.sh).
+// DESTRUCTIVE: the suite deletes the authenticating account's seeded
+// `development` environment to free a managed-environment slot (ADR-051).
+// It does NOT create a throwaway account — it operates on whatever account
+// SMPLKIT_API_KEY belongs to. Running it against a real account therefore
+// wipes that account's `development`. To make accidental destruction
+// impossible, the gate refuses to run unless SMPLKIT_ACC_DESTRUCTIVE=1 is
+// set, an explicit acknowledgement that the target is a throwaway account
+// whose data can be destroyed (ADR-052 §2.8 sanctions a throwaway *local*
+// account under exactly this flag).
+//
+// These tests do not run in this repo's CI; CLI acceptance runs from the
+// smplkit/e2e repo against the production platform (a bootstrapped throwaway
+// Pro-tier account). Run them locally via `make accept`, which sources the
+// dedicated, isolated [local-acceptance] account and sets the flag for you —
+// never run them as your dev/preview account. See
+// ~/projects/.github/docs/local-testing.md.
 //
 // All tests share one ephemeral resource namespace per run; each test
 // generates a unique id so they can run in parallel without colliding.
@@ -56,6 +68,22 @@ func accGate(t *testing.T) {
 	}
 	if os.Getenv("SMPLKIT_API_KEY") == "" {
 		t.Skip("SMPLKIT_API_KEY not set; skipping acceptance test")
+	}
+	// Safety gate: the suite deletes the authenticating account's `development`
+	// environment (see the package doc). It cannot create a throwaway account,
+	// so it refuses to run against whatever account SMPLKIT_API_KEY happens to
+	// hold unless the caller explicitly acknowledges the destruction. `make
+	// accept` sets this for the dedicated, isolated [local-acceptance] account;
+	// the e2e suite sets it for its bootstrapped throwaway prod account. A bare
+	// `go test ./acceptance/...` against a real account is thereby blocked.
+	if os.Getenv("SMPLKIT_ACC_DESTRUCTIVE") != "1" {
+		t.Fatal("refusing to run: these acceptance tests are DESTRUCTIVE — they delete the " +
+			"authenticating account's seeded `development` environment (ADR-051), and operate on " +
+			"whatever account SMPLKIT_API_KEY holds (they do NOT create a throwaway account). Set " +
+			"SMPLKIT_ACC_DESTRUCTIVE=1 only when SMPLKIT_API_KEY points at a dedicated throwaway " +
+			"account whose data may be destroyed. Locally, run `make accept` (it targets the isolated " +
+			"[local-acceptance] account and sets this flag); never run as your dev/preview account. " +
+			"See ~/projects/.github/docs/local-testing.md.")
 	}
 }
 
