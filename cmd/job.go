@@ -547,7 +547,7 @@ func addJobScalarFlags(cmd *cobra.Command, in *jobInputs) {
 	cmd.Flags().StringVar(&in.name, "name", "", "display name (defaults to the id)")
 	cmd.Flags().StringVar(&in.schedule, "schedule", "", "5-field UTC cron, an ISO-8601 datetime, or \"now\"")
 	cmd.Flags().StringVar(&in.timezone, "timezone", "", "IANA timezone the cron is evaluated in (recurring jobs only); empty = UTC")
-	cmd.Flags().StringVar(&in.retryPolicy, "retry-policy", "", "retry policy id for failed runs; empty uses the built-in Default")
+	cmd.Flags().StringVar(&in.retryPolicy, "retry-policy", "", "retry policy id for failed runs; empty = no retries")
 	cmd.Flags().StringVar(&in.url, "url", "", "absolute http(s) URL the job calls when it fires")
 	cmd.Flags().StringVar(&in.method, "method", "POST", "HTTP method: GET|POST|PUT|PATCH|DELETE")
 	cmd.Flags().StringArrayVar(&in.headers, "header", nil, "HTTP header (repeatable): --header \"Name: Value\" (replaces the full header set)")
