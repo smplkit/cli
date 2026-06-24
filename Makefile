@@ -28,7 +28,7 @@ cover: ## Run unit tests with coverage.
 
 .PHONY: accept
 accept: ## Run acceptance tests (ADR-042). DESTRUCTIVE — uses the isolated [local-acceptance] account.
-	@prof="$$(awk '/^\[local-acceptance\]/{p=1;next}/^\[/{p=0}p&&/^[[:space:]]*api_key/{sub(/^[^=]*=[[:space:]]*/,"");print;exit}' $$HOME/.smplkit 2>/dev/null)"; \
+	@prof="$$(awk '/^\[local-acceptance\]/{p=1;next}/^\[/{p=0}p&&/^[[:space:]]*api_key/{sub(/^[^=]*=[[:space:]]*/,"");print;exit}' $$HOME/.smplkit 2>/dev/null || true)"; \
 	base="$${SMPLKIT_BASE_DOMAIN:-localhost}"; \
 	if [ -n "$$prof" ]; then \
 		key="$$prof"; \
