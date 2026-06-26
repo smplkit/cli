@@ -667,27 +667,19 @@ func lineContains(out, id string) bool {
 }
 
 // jobHeaderValue returns the value of the named header from a job's JSON
-// configuration, or "" when absent.
+// configuration, or "" when absent. Headers render as a name→value object
+// (ADR-056), matching the wire and SDK shape.
 func jobHeaderValue(j map[string]interface{}, name string) string {
 	cfg, ok := j["configuration"].(map[string]interface{})
 	if !ok {
 		return ""
 	}
-	headers, ok := cfg["headers"].([]interface{})
+	headers, ok := cfg["headers"].(map[string]interface{})
 	if !ok {
 		return ""
 	}
-	for _, h := range headers {
-		hm, ok := h.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if hm["name"] == name {
-			v, _ := hm["value"].(string)
-			return v
-		}
-	}
-	return ""
+	v, _ := headers[name].(string)
+	return v
 }
 
 // ─── Logger ──────────────────────────────────────────────────────────

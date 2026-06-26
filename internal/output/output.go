@@ -566,46 +566,27 @@ type ForwarderEnvAttr struct {
 // ForwarderHTTPConfigAttr is the JSON/YAML shape for the HTTP destination
 // configuration (currently the only supported transport family).
 type ForwarderHTTPConfigAttr struct {
-	URL           string                `json:"url" yaml:"url"`
-	Method        smplkit.HttpMethod    `json:"method,omitempty" yaml:"method,omitempty"`
-	Headers       []ForwarderHeaderAttr `json:"headers,omitempty" yaml:"headers,omitempty"`
-	SuccessStatus string                `json:"success_status,omitempty" yaml:"success_status,omitempty"`
-	TLSVerify     *bool                 `json:"tls_verify,omitempty" yaml:"tls_verify,omitempty"`
-	CACert        *string               `json:"ca_cert,omitempty" yaml:"ca_cert,omitempty"`
-}
-
-// ForwarderHeaderAttr is the JSON/YAML shape for an HTTP header pair.
-type ForwarderHeaderAttr struct {
-	Name  string `json:"name" yaml:"name"`
-	Value string `json:"value" yaml:"value"`
-}
-
-// sortedHeaderNames returns a header map's keys in deterministic order. Since
-// ADR-056 the wire carries headers as an unordered object, so the CLI sorts
-// them by name to keep JSON/YAML output and table rendering stable across reads.
-func sortedHeaderNames(h map[string]string) []string {
-	names := make([]string, 0, len(h))
-	for name := range h {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
+	URL    string             `json:"url" yaml:"url"`
+	Method smplkit.HttpMethod `json:"method,omitempty" yaml:"method,omitempty"`
+	// Headers is the name→value map the wire and SDK use (ADR-056). Emitted as
+	// a JSON object / YAML mapping; `apply -f` reads it back in the same shape.
+	Headers       map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	SuccessStatus string            `json:"success_status,omitempty" yaml:"success_status,omitempty"`
+	TLSVerify     *bool             `json:"tls_verify,omitempty" yaml:"tls_verify,omitempty"`
+	CACert        *string           `json:"ca_cert,omitempty" yaml:"ca_cert,omitempty"`
 }
 
 // httpConfigToAttr projects an SDK HttpConfiguration onto its attribute
 // shape. Shared by the base configuration and per-environment overrides.
 func httpConfigToAttr(c smplkit.HttpConfiguration) ForwarderHTTPConfigAttr {
-	cfg := ForwarderHTTPConfigAttr{
+	return ForwarderHTTPConfigAttr{
 		URL:           c.URL,
 		Method:        c.Method,
+		Headers:       c.Headers,
 		SuccessStatus: c.SuccessStatus,
 		TLSVerify:     c.TlsVerify,
 		CACert:        c.CaCert,
 	}
-	for _, name := range sortedHeaderNames(c.Headers) {
-		cfg.Headers = append(cfg.Headers, ForwarderHeaderAttr{Name: name, Value: c.Headers[name]})
-	}
-	return cfg
 }
 
 // forwarderEnvLeavesToAttr reconstructs the CLI's nested per-environment
@@ -620,12 +601,10 @@ func forwarderEnvLeavesToAttr(e *smplkit.ForwarderEnvironment) *ForwarderHTTPCon
 	cfg := ForwarderHTTPConfigAttr{
 		URL:           e.URL,
 		Method:        e.Method,
+		Headers:       e.Headers,
 		SuccessStatus: e.SuccessStatus,
 		TLSVerify:     e.TlsVerify,
 		CACert:        e.CaCert,
-	}
-	for _, name := range sortedHeaderNames(e.Headers) {
-		cfg.Headers = append(cfg.Headers, ForwarderHeaderAttr{Name: name, Value: e.Headers[name]})
 	}
 	return &cfg
 }
@@ -783,37 +762,30 @@ type JobEnvAttr struct {
 // JobHTTPConfigAttr is the JSON/YAML shape for the HTTP request a job
 // fires when it runs.
 type JobHTTPConfigAttr struct {
-	URL           string          `json:"url" yaml:"url"`
-	Method        string          `json:"method,omitempty" yaml:"method,omitempty"`
-	Headers       []JobHeaderAttr `json:"headers,omitempty" yaml:"headers,omitempty"`
-	Body          *string         `json:"body,omitempty" yaml:"body,omitempty"`
-	SuccessStatus string          `json:"success_status,omitempty" yaml:"success_status,omitempty"`
-	Timeout       int             `json:"timeout,omitempty" yaml:"timeout,omitempty"`
-	TLSVerify     *bool           `json:"tls_verify,omitempty" yaml:"tls_verify,omitempty"`
-	CACert        *string         `json:"ca_cert,omitempty" yaml:"ca_cert,omitempty"`
-}
-
-// JobHeaderAttr is the JSON/YAML shape for an HTTP header pair.
-type JobHeaderAttr struct {
-	Name  string `json:"name" yaml:"name"`
-	Value string `json:"value" yaml:"value"`
+	URL    string `json:"url" yaml:"url"`
+	Method string `json:"method,omitempty" yaml:"method,omitempty"`
+	// Headers is the name→value map the wire and SDK use (ADR-056). Emitted as
+	// a JSON object / YAML mapping; `apply -f` reads it back in the same shape.
+	Headers       map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	Body          *string           `json:"body,omitempty" yaml:"body,omitempty"`
+	SuccessStatus string            `json:"success_status,omitempty" yaml:"success_status,omitempty"`
+	Timeout       int               `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+	TLSVerify     *bool             `json:"tls_verify,omitempty" yaml:"tls_verify,omitempty"`
+	CACert        *string           `json:"ca_cert,omitempty" yaml:"ca_cert,omitempty"`
 }
 
 // jobHTTPConfigToAttr projects an SDK HttpConfig onto its attribute shape.
 func jobHTTPConfigToAttr(c smplkit.HttpConfig) JobHTTPConfigAttr {
-	cfg := JobHTTPConfigAttr{
+	return JobHTTPConfigAttr{
 		URL:           c.URL,
 		Method:        string(c.Method),
+		Headers:       c.Headers,
 		Body:          c.Body,
 		SuccessStatus: c.SuccessStatus,
 		Timeout:       c.Timeout,
 		TLSVerify:     c.TlsVerify,
 		CACert:        c.CaCert,
 	}
-	for _, name := range sortedHeaderNames(c.Headers) {
-		cfg.Headers = append(cfg.Headers, JobHeaderAttr{Name: name, Value: c.Headers[name]})
-	}
-	return cfg
 }
 
 // jobEnvLeavesToAttr reconstructs the CLI's nested per-environment
@@ -828,14 +800,12 @@ func jobEnvLeavesToAttr(e *smplkit.JobEnvironment) *JobHTTPConfigAttr {
 	cfg := JobHTTPConfigAttr{
 		URL:           e.URL,
 		Method:        string(e.Method),
+		Headers:       e.Headers,
 		Body:          e.Body,
 		SuccessStatus: e.SuccessStatus,
 		Timeout:       e.Timeout,
 		TLSVerify:     e.TlsVerify,
 		CACert:        e.CaCert,
-	}
-	for _, name := range sortedHeaderNames(e.Headers) {
-		cfg.Headers = append(cfg.Headers, JobHeaderAttr{Name: name, Value: e.Headers[name]})
 	}
 	return &cfg
 }

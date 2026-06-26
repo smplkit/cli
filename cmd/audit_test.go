@@ -101,9 +101,7 @@ func TestApplyForwarderFileToModel_PerEnvConfigOverride(t *testing.T) {
 					Method:        "PUT",
 					SuccessStatus: "2xx",
 					TLSVerify:     &tlsVerify,
-					Headers: []output.ForwarderHeaderAttr{
-						{Name: "X-Env", Value: "prod"},
-					},
+					Headers:       map[string]string{"X-Env": "prod"},
 				},
 			},
 		},

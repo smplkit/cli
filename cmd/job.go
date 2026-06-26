@@ -663,19 +663,6 @@ func newJobForSchedule(ns *smplkit.JobsClient, id, name, schedule string, cfg sm
 	}
 }
 
-// jobHeaderAttrsToMap converts the CLI's ordered header-attribute list into the
-// SDK's name→value header map (ADR-056). Returns nil for an empty list.
-func jobHeaderAttrsToMap(hs []output.JobHeaderAttr) map[string]string {
-	if len(hs) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(hs))
-	for _, h := range hs {
-		out[h.Name] = h.Value
-	}
-	return out
-}
-
 // applyJobConfigAttrToEnv flattens the CLI's nested per-environment
 // configuration attribute onto a JobEnvironment's flat override leaves
 // (ADR-056). A nil attr overrides nothing; each non-zero leaf becomes a
@@ -691,7 +678,7 @@ func applyJobConfigAttrToEnv(env *smplkit.JobEnvironment, c *output.JobHTTPConfi
 	env.Body = c.Body
 	env.TlsVerify = c.TLSVerify
 	env.CaCert = c.CACert
-	env.Headers = jobHeaderAttrsToMap(c.Headers)
+	env.Headers = c.Headers
 }
 
 // jobEnvFileToModel converts the file shape's environments map into the
@@ -808,7 +795,7 @@ func buildJobHTTPConfig(shape *jobFileShape, in jobInputs) (smplkit.HttpConfig, 
 		cfg.Body = c.Body
 		cfg.TlsVerify = c.TLSVerify
 		cfg.CaCert = c.CACert
-		cfg.Headers = jobHeaderAttrsToMap(c.Headers)
+		cfg.Headers = c.Headers
 	}
 
 	if in.urlSet {
@@ -940,7 +927,7 @@ func applyJobFileToModel(job *smplkit.Job, shape *jobFileShape) {
 			job.Configuration.CaCert = c.CACert
 		}
 		if c.Headers != nil {
-			job.Configuration.Headers = jobHeaderAttrsToMap(c.Headers)
+			job.Configuration.Headers = c.Headers
 		}
 	}
 }

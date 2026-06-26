@@ -247,7 +247,7 @@ func TestRenderer_Job_JSON(t *testing.T) {
 		t.Errorf("config: %+v", got.Configuration)
 	}
 	// Header values round-trip plaintext (what makes `apply -f` work).
-	if len(got.Configuration.Headers) != 1 || got.Configuration.Headers[0].Value != "Bearer abc" {
+	if len(got.Configuration.Headers) != 1 || got.Configuration.Headers["Authorization"] != "Bearer abc" {
 		t.Errorf("headers: %+v", got.Configuration.Headers)
 	}
 	if got.Configuration.Body == nil || *got.Configuration.Body != "ping" {

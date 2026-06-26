@@ -449,19 +449,6 @@ func buildForwarderForCreate(ns *smplkit.AuditForwarders, id string, shape *forw
 	return ns.New(id, effName, ft, cfg, opts...), nil
 }
 
-// forwarderHeaderAttrsToMap converts the CLI's ordered header-attribute list
-// into the SDK's name→value header map (ADR-056). Returns nil for an empty list.
-func forwarderHeaderAttrsToMap(hs []output.ForwarderHeaderAttr) map[string]string {
-	if len(hs) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(hs))
-	for _, h := range hs {
-		out[h.Name] = h.Value
-	}
-	return out
-}
-
 // applyForwarderConfigAttrToEnv flattens the CLI's nested per-environment
 // configuration attribute onto a ForwarderEnvironment's flat override leaves
 // (ADR-056). A nil attr overrides nothing; each non-zero leaf becomes a sparse
@@ -475,7 +462,7 @@ func applyForwarderConfigAttrToEnv(env *smplkit.ForwarderEnvironment, c *output.
 	env.SuccessStatus = c.SuccessStatus
 	env.TlsVerify = c.TLSVerify
 	env.CaCert = c.CACert
-	env.Headers = forwarderHeaderAttrsToMap(c.Headers)
+	env.Headers = c.Headers
 }
 
 // fileEnvsToModel converts the file shape's environments map into the
@@ -602,7 +589,7 @@ func applyForwarderFileToModel(f *smplkit.Forwarder, shape *forwarderFileShape) 
 			f.Configuration.CaCert = shape.Configuration.CACert
 		}
 		if shape.Configuration.Headers != nil {
-			f.Configuration.Headers = forwarderHeaderAttrsToMap(shape.Configuration.Headers)
+			f.Configuration.Headers = shape.Configuration.Headers
 		}
 	}
 }
@@ -678,7 +665,7 @@ func buildHTTPConfig(shape *forwarderFileShape, in forwarderInputs) (smplkit.Htt
 		cfg.SuccessStatus = shape.Configuration.SuccessStatus
 		cfg.TlsVerify = shape.Configuration.TLSVerify
 		cfg.CaCert = shape.Configuration.CACert
-		cfg.Headers = forwarderHeaderAttrsToMap(shape.Configuration.Headers)
+		cfg.Headers = shape.Configuration.Headers
 	}
 	if in.url != "" {
 		cfg.URL = in.url

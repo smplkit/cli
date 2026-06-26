@@ -134,11 +134,9 @@ func TestBuildJobHTTPConfig_RequiresURL(t *testing.T) {
 func TestBuildJobHTTPConfig_ScalarOverridesFile(t *testing.T) {
 	shape := &jobFileShape{
 		Configuration: &output.JobHTTPConfigAttr{
-			URL:    "https://file.test",
-			Method: "GET",
-			Headers: []output.JobHeaderAttr{
-				{Name: "X-File", Value: "1"},
-			},
+			URL:     "https://file.test",
+			Method:  "GET",
+			Headers: map[string]string{"X-File": "1"},
 		},
 	}
 	in := jobInputs{
@@ -512,7 +510,7 @@ func TestApplyJobFileToModel_AllConfigFields(t *testing.T) {
 			Body:          &body,
 			TLSVerify:     &tls,
 			CACert:        &ca,
-			Headers:       []output.JobHeaderAttr{{Name: "X-New", Value: "2"}},
+			Headers:       map[string]string{"X-New": "2"},
 		},
 	}
 	applyJobFileToModel(existing, shape)
